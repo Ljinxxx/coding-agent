@@ -22,3 +22,12 @@
 - 工具调用验证命令：`python scripts/verify_tool_calling.py`
 - 工具调用验证结果：大模型成功调用测试工具，程序正确解析出工具名称 `echo` 和参数 `{'text': 'stage3-ok'}`。
 - 验证截图：`stage03_response_parser.png`、`stage03_tool_calling.png`
+
+## 第四阶段：本地文件操作工具
+
+- 验证目标：验证程序能够在本地工作目录中正常列出目录、读取文件、创建和覆盖写入文件，并能够正确处理不存在的文件和目录。
+- 自动化验证命令：`python -m pytest tests/test_file_tools.py -v`
+- 自动化验证结果：8 项测试全部通过。
+- 人工验证命令：`python -m scripts.verify_file_tools`
+- 人工验证结果：程序成功创建 `stage4_demo.txt`，能够列出该文件并正确读取其中的 `hello stage4` 内容。
+- 验证截图：`stage04_file_tools.png`、`stage04_file_tools_manual.png`
