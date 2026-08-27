@@ -31,3 +31,23 @@
 - 人工验证命令：`python -m scripts.verify_file_tools`
 - 人工验证结果：程序成功创建 `stage4_demo.txt`，能够列出该文件并正确读取其中的 `hello stage4` 内容。
 - 验证截图：`stage04_file_tools.png`、`stage04_file_tools_manual.png`
+
+## 第五阶段：本地命令执行工具
+
+- 验证目标：验证程序能够在指定本地工作目录中执行真实命令，并正确获取命令的退出状态、正常输出、错误输出和超时状态。
+- 自动化验证命令：`python -m pytest tests/test_shell_tool.py -v --basetemp=.pytest_tmp`
+- 自动化验证结果：6 项测试全部通过。
+- 人工验证命令：`python -m scripts.verify_shell_tool`
+- 人工验证结果：程序成功在项目工作目录中执行真实本地命令，并正确获取文本输出、实际工作目录和 Python 计算结果。
+- 验证截图：`stage05_shell_tool.png`、`stage05_shell_tool_manual.png`
+
+## 第五阶段：本地命令执行工具
+
+- 验证目标：验证程序能够在指定本地工作目录中执行真实命令，并正确获取命令的退出状态、正常输出、错误输出和超时状态。
+- 自动化验证命令：`python -m pytest tests/test_shell_tool.py -v --basetemp=.pytest_tmp`
+- 自动化验证结果：6 项测试全部通过。
+- 人工验证命令：`python -m scripts.verify_shell_tool`
+- 人工验证结果：程序成功通过 RunCommandTool 启动真实本地 Python 子进程。验证脚本进程与子进程 PID 不同，子进程使用当前项目虚拟环境中的 Python，并运行在指定项目工作目录中，同时能够正确返回标准输出、退出状态和超时状态。
+- 完整回归验证命令：`python -m pytest -v --basetemp=.pytest_tmp`
+- 完整回归验证结果：22 项测试全部通过。
+- 验证截图：`stage05_shell_tool.png`、`stage05_shell_tool_manual.png`
