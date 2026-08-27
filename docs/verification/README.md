@@ -13,3 +13,12 @@
 - 验证命令：`python -m pytest tests/test_tool_registry.py -v`
 - 测试结果：4 项测试全部通过。
 - 验证截图：`stage02_tool_registry.png`
+
+## 第三阶段：工具调用与模型输出解析
+
+- 验证目标：验证程序能够正确解析模型普通文本、单个及多个工具调用，并能够识别非法工具参数；同时验证大模型能够实际产生工具调用。
+- 模型输出解析验证命令：`python -m pytest tests/test_response_parser.py -v`
+- 模型输出解析验证结果：4 项测试全部通过。
+- 工具调用验证命令：`python scripts/verify_tool_calling.py`
+- 工具调用验证结果：大模型成功调用测试工具，程序正确解析出工具名称 `echo` 和参数 `{'text': 'stage3-ok'}`。
+- 验证截图：`stage03_response_parser.png`、`stage03_tool_calling.png`
