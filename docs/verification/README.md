@@ -94,3 +94,21 @@
 - 完整回归验证命令：`python -m pytest -v --basetemp=.pytest_tmp`
 - 完整回归验证结果：44 项测试全部通过。
 - 验证截图：`stage09_conversation_history.png`、`stage09_conversation_history_manual.png`、`stage09_conversation_history_real_llm.png`
+
+## 第十阶段：上下文长度管理
+
+- 验证目标：验证 Agent 能够在保留完整 Conversation History 的同时，根据可配置字符预算为每次 LLM 调用构造受限 Context；旧历史按照完整 User Turn 从旧到新淘汰，保留 system prompt、当前 Turn 和最近连续完整 Turns，避免拆散 Tool Call / Tool Result。
+- 上下文预算：使用完整消息列表的稳定 JSON 序列化长度作为模型无关的字符规模代理，包含 Tool Call、Tool Result 和参数等消息结构；该数值不等价于精确 Token Count，也不包含 Tool Schema 或 Provider 协议开销。
+- 自动化验证命令：`python -m pytest tests/test_agent_context.py -v --basetemp=.pytest_tmp`
+- 自动化验证结果：7 项测试全部通过。
+- 人工验证命令：`python -m scripts.verify_agent_context`
+- 人工验证结果：Fake LLM 最后一次调用的 Context 已移除最旧 Turn，但最近 Turn、当前 Turn 与 system prompt 仍被保留；同时 Agent Full History 中旧 Turn 仍然存在，最终 Context 大小没有超过动态字符预算。
+- 真实模型集成验证命令：`python -m scripts.verify_agent_context_real`
+- 真实模型集成验证结果：真实 API 最后一次请求使用动态字符预算构造 Context，旧随机标记已从发送给模型的 Context 中移除，而最近随机标记、当前 Turn 与 system prompt 被保留；完整 History 仍保留旧标记，真实模型能够利用保留的最近 Context 返回最近随机标记。
+- Stage 9 回归验证：6 项测试全部通过。
+- Stage 8 回归验证：5 项测试全部通过。
+- Stage 7 回归验证：5 项测试全部通过。
+- Stage 6 回归验证：6 项测试全部通过。
+- 完整回归验证命令：`python -m pytest -v --basetemp=.pytest_tmp`
+- 完整回归验证结果：51 项测试全部通过。
+- 计划由用户后续手工保存的验证截图：`stage10_context_management.png`、`stage10_context_management_manual.png`、`stage10_context_management_real_llm.png`；本次未生成或伪造截图文件。

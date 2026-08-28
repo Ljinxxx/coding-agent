@@ -30,6 +30,10 @@ class AgentResponseError(RuntimeError):
     pass
 
 
+class AgentContextLimitError(RuntimeError):
+    pass
+
+
 class Agent:
     def __init__(
         self,
@@ -38,15 +42,21 @@ class Agent:
         system_prompt: str | None = None,
         verbose: bool = False,
         max_steps: int = 20,
+        max_context_chars: int | None = None,
     ) -> None:
         if max_steps < 1:
             raise ValueError("max_steps must be at least 1.")
+        if max_context_chars is not None and max_context_chars < 1:
+            raise ValueError(
+                "max_context_chars must be greater than 0 or None."
+            )
 
         self.llm_client = llm_client
         self.tool_registry = tool_registry
         self.system_prompt = system_prompt
         self.verbose = verbose
         self.max_steps = max_steps
+        self.max_context_chars = max_context_chars
         self.parser = ResponseParser()
         self._messages = self._create_initial_history()
 
@@ -68,6 +78,76 @@ class Agent:
             }
         ]
 
+    def _estimate_messages_size(
+        self,
+        messages: list[dict[str, Any]],
+    ) -> int:
+        serialized = json.dumps(
+            messages,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return len(serialized)
+
+    def _split_history_into_turns(
+        self,
+        messages: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[list[dict[str, Any]]]]:
+        system_messages: list[dict[str, Any]] = []
+        conversation_messages = messages
+
+        if messages and messages[0].get("role") == "system":
+            system_messages = [messages[0]]
+            conversation_messages = messages[1:]
+
+        turns: list[list[dict[str, Any]]] = []
+        for message in conversation_messages:
+            if message.get("role") == "user":
+                turns.append([message])
+            else:
+                turns[-1].append(message)
+
+        return system_messages, turns
+
+    def _build_context_messages(self) -> list[dict[str, Any]]:
+        if self.max_context_chars is None:
+            return deepcopy(self._messages)
+
+        system_messages, turns = self._split_history_into_turns(
+            self._messages
+        )
+        current_turn = turns[-1] if turns else []
+        selected_turns = [current_turn] if current_turn else []
+        context_messages = system_messages + current_turn
+        required_size = self._estimate_messages_size(context_messages)
+
+        if required_size > self.max_context_chars:
+            raise AgentContextLimitError(
+                "Required context size "
+                f"{required_size} exceeds max_context_chars "
+                f"{self.max_context_chars}."
+            )
+
+        for turn in reversed(turns[:-1]):
+            candidate_turns = [turn, *selected_turns]
+            candidate_messages = system_messages + [
+                message
+                for selected_turn in candidate_turns
+                for message in selected_turn
+            ]
+
+            if (
+                self._estimate_messages_size(candidate_messages)
+                > self.max_context_chars
+            ):
+                break
+
+            selected_turns = candidate_turns
+            context_messages = candidate_messages
+
+        return deepcopy(context_messages)
+
     def run(self, user_input: str) -> str:
         self._messages.append(
             {
@@ -79,9 +159,10 @@ class Agent:
         for step in range(1, self.max_steps + 1):
             self._log(f"Step {step}/{self.max_steps}")
             tool_schemas = self.tool_registry.schemas()
+            context_messages = self._build_context_messages()
             try:
                 response = self.llm_client.chat(
-                    self._messages,
+                    context_messages,
                     tools=tool_schemas,
                 )
             except Exception as error:
