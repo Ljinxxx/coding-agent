@@ -78,3 +78,19 @@
 - 完整回归验证命令：`python -m pytest -v --basetemp=.pytest_tmp`
 - 完整回归验证结果：38 项测试全部通过。
 - 验证截图：`stage08_error_recovery.png`、`stage08_error_recovery_manual.png`、`stage08_error_recovery_real_llm.png`
+
+## 第九阶段：对话历史管理
+
+- 验证目标：验证同一个 Agent 实例能够在多次 `run()` 之间保留完整 conversation history，包括 User、Assistant Tool Call、Tool Result 与 Assistant Final Answer，并支持显式重置历史和安全读取历史快照。
+- 自动化验证命令：`python -m pytest tests/test_agent_history.py -v --basetemp=.pytest_tmp`
+- 自动化验证结果：6 项测试全部通过。
+- 人工验证命令：`python -m scripts.verify_agent_history`
+- 人工验证结果：第二次 `run()` 能够接收到第一轮 User 与 Assistant 历史；执行 `reset_history()` 后旧会话内容被清除，同时 system prompt 正确保留，reset 后的新一轮调用不再收到旧会话。
+- 真实模型集成验证命令：`python -m scripts.verify_agent_history_real`
+- 真实模型集成验证结果：使用运行时随机会话标记进行两轮真实模型调用，第二轮 Prompt 未重复提供标记；Agent 将第一轮完整对话历史发送给真实模型，模型能够从历史中正确返回随机标记。
+- Stage 8 回归验证：5 项测试全部通过。
+- Stage 7 回归验证：5 项测试全部通过。
+- Stage 6 回归验证：6 项测试全部通过。
+- 完整回归验证命令：`python -m pytest -v --basetemp=.pytest_tmp`
+- 完整回归验证结果：44 项测试全部通过。
+- 验证截图：`stage09_conversation_history.png`、`stage09_conversation_history_manual.png`、`stage09_conversation_history_real_llm.png`

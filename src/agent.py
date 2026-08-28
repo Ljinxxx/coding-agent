@@ -1,4 +1,5 @@
 import json
+from copy import deepcopy
 from typing import Any
 
 from src.parser import ResponseParser
@@ -47,19 +48,28 @@ class Agent:
         self.verbose = verbose
         self.max_steps = max_steps
         self.parser = ResponseParser()
+        self._messages = self._create_initial_history()
+
+    @property
+    def history(self) -> list[dict[str, Any]]:
+        return deepcopy(self._messages)
+
+    def reset_history(self) -> None:
+        self._messages = self._create_initial_history()
+
+    def _create_initial_history(self) -> list[dict[str, Any]]:
+        if not self.system_prompt:
+            return []
+
+        return [
+            {
+                "role": "system",
+                "content": self.system_prompt,
+            }
+        ]
 
     def run(self, user_input: str) -> str:
-        messages: list[dict[str, Any]] = []
-
-        if self.system_prompt:
-            messages.append(
-                {
-                    "role": "system",
-                    "content": self.system_prompt,
-                }
-            )
-
-        messages.append(
+        self._messages.append(
             {
                 "role": "user",
                 "content": user_input,
@@ -71,7 +81,7 @@ class Agent:
             tool_schemas = self.tool_registry.schemas()
             try:
                 response = self.llm_client.chat(
-                    messages,
+                    self._messages,
                     tools=tool_schemas,
                 )
             except Exception as error:
@@ -85,9 +95,15 @@ class Agent:
                 ) from error
 
             if not parsed.has_tool_calls:
+                self._messages.append(
+                    {
+                        "role": "assistant",
+                        "content": parsed.content,
+                    }
+                )
                 return parsed.content
 
-            messages.append(
+            self._messages.append(
                 {
                     "role": "assistant",
                     "content": parsed.content or None,
@@ -123,7 +139,7 @@ class Agent:
                     result = _format_tool_error(tool_call.name, error)
 
                 self._log(f"工具结果：{result}")
-                messages.append(
+                self._messages.append(
                     {
                         "role": "tool",
                         "tool_call_id": tool_call.id,
