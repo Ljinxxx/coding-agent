@@ -53,3 +53,16 @@
 - 完整回归验证命令：`python -m pytest -v --basetemp=.pytest_tmp`
 - 完整回归验证结果：28 项测试全部通过。
 - 验证截图：`stage06_agent_loop.png`、`stage06_agent_loop_manual.png`
+
+## 第七阶段：智能体循环终止机制
+
+- 验证目标：验证 Agent 能够在正常任务中于最大步数限制内完成任务，并在模型持续请求工具、无法产生最终答案时严格限制模型调用次数并可靠终止，防止 Agent Loop 无限运行。
+- 自动化验证命令：`python -m pytest tests/test_agent_termination.py -v --basetemp=.pytest_tmp`
+- 自动化验证结果：5 项测试全部通过。
+- 人工验证命令：`python -m scripts.verify_agent_termination`
+- 人工验证结果：正常任务能够在步数限制内返回最终答案；持续返回 Tool Call 的可控模型在达到设定的最大步数后被 Agent 强制终止，实际模型调用次数与 `max_steps` 一致，未发生额外模型调用。
+- 完整回归验证命令：`python -m pytest -v --basetemp=.pytest_tmp`
+- 完整回归验证结果：33 项测试全部通过。
+- 验证截图：`stage07_agent_termination.png`、`stage07_agent_termination_manual.png`
+- 真实模型验证：使用当前 Stage 7 Agent 重新执行真实模型 Agent Loop，模型在 `max_steps=20` 的情况下于第 4 次 LLM 调用返回最终答案，Agent 随即正常终止，未继续执行后续 Step。
+- 验证截图：`stage07_agent_termination.png`、`stage07_agent_termination_manual.png`、`stage07_agent_termination_real_llm.png`

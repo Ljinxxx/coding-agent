@@ -5,6 +5,10 @@ from src.parser import ResponseParser
 from src.tools.registry import ToolRegistry
 
 
+class AgentMaxStepsError(RuntimeError):
+    pass
+
+
 class Agent:
     def __init__(
         self,
@@ -12,11 +16,16 @@ class Agent:
         tool_registry: ToolRegistry,
         system_prompt: str | None = None,
         verbose: bool = False,
+        max_steps: int = 20,
     ) -> None:
+        if max_steps < 1:
+            raise ValueError("max_steps must be at least 1.")
+
         self.llm_client = llm_client
         self.tool_registry = tool_registry
         self.system_prompt = system_prompt
         self.verbose = verbose
+        self.max_steps = max_steps
         self.parser = ResponseParser()
 
     def run(self, user_input: str) -> str:
@@ -37,7 +46,8 @@ class Agent:
             }
         )
 
-        while True:
+        for step in range(1, self.max_steps + 1):
+            self._log(f"Step {step}/{self.max_steps}")
             response = self.llm_client.chat(
                 messages,
                 tools=self.tool_registry.schemas(),
@@ -87,7 +97,12 @@ class Agent:
                     }
                 )
 
-            self._log("再次调用模型")
+            if step < self.max_steps:
+                self._log("再次调用模型")
+
+        raise AgentMaxStepsError(
+            f"Agent reached maximum step limit: {self.max_steps}"
+        )
 
     def _log(self, message: str) -> None:
         if self.verbose:
