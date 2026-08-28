@@ -63,6 +63,18 @@
 - 人工验证结果：正常任务能够在步数限制内返回最终答案；持续返回 Tool Call 的可控模型在达到设定的最大步数后被 Agent 强制终止，实际模型调用次数与 `max_steps` 一致，未发生额外模型调用。
 - 完整回归验证命令：`python -m pytest -v --basetemp=.pytest_tmp`
 - 完整回归验证结果：33 项测试全部通过。
-- 验证截图：`stage07_agent_termination.png`、`stage07_agent_termination_manual.png`
 - 真实模型验证：使用当前 Stage 7 Agent 重新执行真实模型 Agent Loop，模型在 `max_steps=20` 的情况下于第 4 次 LLM 调用返回最终答案，Agent 随即正常终止，未继续执行后续 Step。
-- 验证截图：`stage07_agent_termination.png`、`stage07_agent_termination_manual.png`、`stage07_agent_termination_real_llm.png`
+- 验证截图：`stage07_agent_termination.png`、`stage07_agent_termination_manual.png`、`stage07_real_llm_early_termination.png`
+
+## 第八阶段：错误处理与恢复机制
+
+- 验证目标：验证 Agent 能够将工具查找失败和工具执行异常转换为结构化 Tool Error Result 返回模型，使模型能够继续决策和恢复；同时验证 LLM 调用异常和模型响应解析错误会以明确的 Agent 层异常向上传播。
+- 自动化验证命令：`python -m pytest tests/test_agent_error_handling.py -v --basetemp=.pytest_tmp`
+- 自动化验证结果：5 项测试全部通过。
+- 人工验证命令：`python -m scripts.verify_agent_error_recovery`
+- 人工验证结果：真实 ReadFileTool 首次读取不存在文件产生 FileNotFoundError，Agent 将错误转换为 Tool Result 返回模型；后续模型调用选择正确文件并成功读取，最终正常结束。
+- 真实模型集成验证命令：`python -m scripts.verify_agent_error_recovery_real`
+- 真实模型集成验证结果：真实模型首先尝试读取不存在的 `missing.txt`，Agent 将真实 `FileNotFoundError` 转换为 Tool Error Result 返回模型；模型随后调用 `list_directory` 检查工作区，发现实际存在的随机目标文件，再通过 `read_file` 读取其真实随机内容，并在最终回答中明确区分首次失败文件与恢复后成功读取的文件。
+- 完整回归验证命令：`python -m pytest -v --basetemp=.pytest_tmp`
+- 完整回归验证结果：38 项测试全部通过。
+- 验证截图：`stage08_error_recovery.png`、`stage08_error_recovery_manual.png`、`stage08_error_recovery_real_llm.png`

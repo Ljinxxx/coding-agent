@@ -5,7 +5,27 @@ from src.parser import ResponseParser
 from src.tools.registry import ToolRegistry
 
 
+def _format_tool_error(tool_name: str, error: Exception) -> str:
+    return json.dumps(
+        {
+            "ok": False,
+            "tool": tool_name,
+            "error_type": type(error).__name__,
+            "message": str(error),
+        },
+        ensure_ascii=False,
+    )
+
+
 class AgentMaxStepsError(RuntimeError):
+    pass
+
+
+class AgentLLMError(RuntimeError):
+    pass
+
+
+class AgentResponseError(RuntimeError):
     pass
 
 
@@ -48,11 +68,21 @@ class Agent:
 
         for step in range(1, self.max_steps + 1):
             self._log(f"Step {step}/{self.max_steps}")
-            response = self.llm_client.chat(
-                messages,
-                tools=self.tool_registry.schemas(),
-            )
-            parsed = self.parser.parse(response)
+            tool_schemas = self.tool_registry.schemas()
+            try:
+                response = self.llm_client.chat(
+                    messages,
+                    tools=tool_schemas,
+                )
+            except Exception as error:
+                raise AgentLLMError(f"LLM request failed: {error}") from error
+
+            try:
+                parsed = self.parser.parse(response)
+            except ValueError as error:
+                raise AgentResponseError(
+                    f"Failed to parse model response: {error}"
+                ) from error
 
             if not parsed.has_tool_calls:
                 return parsed.content
@@ -85,8 +115,12 @@ class Agent:
                     + json.dumps(tool_call.arguments, ensure_ascii=False)
                 )
 
-                tool = self.tool_registry.get(tool_call.name)
-                result = tool.execute(**tool_call.arguments)
+                try:
+                    tool = self.tool_registry.get(tool_call.name)
+                    result = tool.execute(**tool_call.arguments)
+                except Exception as error:
+                    self._log(f"工具执行失败：{tool_call.name}")
+                    result = _format_tool_error(tool_call.name, error)
 
                 self._log(f"工具结果：{result}")
                 messages.append(
