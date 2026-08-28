@@ -20,20 +20,20 @@ class LLMClient:
     @overload
     def chat(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         tools: None = None,
     ) -> str: ...
 
     @overload
     def chat(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
     ) -> ChatCompletionMessage: ...
 
     def chat(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
     ) -> str | ChatCompletionMessage:
         request: dict[str, Any] = {

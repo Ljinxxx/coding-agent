@@ -38,16 +38,18 @@
 - 自动化验证命令：`python -m pytest tests/test_shell_tool.py -v --basetemp=.pytest_tmp`
 - 自动化验证结果：6 项测试全部通过。
 - 人工验证命令：`python -m scripts.verify_shell_tool`
-- 人工验证结果：程序成功在项目工作目录中执行真实本地命令，并正确获取文本输出、实际工作目录和 Python 计算结果。
-- 验证截图：`stage05_shell_tool.png`、`stage05_shell_tool_manual.png`
-
-## 第五阶段：本地命令执行工具
-
-- 验证目标：验证程序能够在指定本地工作目录中执行真实命令，并正确获取命令的退出状态、正常输出、错误输出和超时状态。
-- 自动化验证命令：`python -m pytest tests/test_shell_tool.py -v --basetemp=.pytest_tmp`
-- 自动化验证结果：6 项测试全部通过。
-- 人工验证命令：`python -m scripts.verify_shell_tool`
 - 人工验证结果：程序成功通过 RunCommandTool 启动真实本地 Python 子进程。验证脚本进程与子进程 PID 不同，子进程使用当前项目虚拟环境中的 Python，并运行在指定项目工作目录中，同时能够正确返回标准输出、退出状态和超时状态。
 - 完整回归验证命令：`python -m pytest -v --basetemp=.pytest_tmp`
 - 完整回归验证结果：22 项测试全部通过。
 - 验证截图：`stage05_shell_tool.png`、`stage05_shell_tool_manual.png`
+
+## 第六阶段：基础智能体执行循环
+
+- 验证目标：验证模型能够自主发起工具调用，Agent 能够通过工具注册表执行对应本地工具，将真实工具结果反馈给模型，并持续循环直到模型返回最终文本。
+- 自动化验证命令：`python -m pytest tests/test_agent.py -v --basetemp=.pytest_tmp`
+- 自动化验证结果：6 项测试全部通过。
+- 人工验证命令：`python -m scripts.verify_agent_loop`
+- 人工验证结果：真实模型成功读取运行时随机生成的本地文件内容，并基于工具返回结果继续推理，将未知内容写入新的本地文件后再次确认，最终回答与实际文件内容一致，证明模型调用、工具执行和结果反馈形成完整闭环。
+- 完整回归验证命令：`python -m pytest -v --basetemp=.pytest_tmp`
+- 完整回归验证结果：28 项测试全部通过。
+- 验证截图：`stage06_agent_loop.png`、`stage06_agent_loop_manual.png`
