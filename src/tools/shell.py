@@ -22,6 +22,7 @@ class RunCommandTool(BaseTool):
         "Execute a shell command in the local workspace and return its exit status, "
         "standard output, standard error, and timeout status."
     )
+    mutates_workspace = True
     parameters = {
         "type": "object",
         "properties": {

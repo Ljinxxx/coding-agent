@@ -6,6 +6,7 @@ class BaseTool(ABC):
     name: str
     description: str
     parameters: dict[str, Any]
+    mutates_workspace = False
 
     def to_schema(self) -> dict[str, Any]:
         return {

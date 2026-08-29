@@ -71,6 +71,7 @@ class ReadFileTool(BaseTool):
 class WriteFileTool(BaseTool):
     name = "write_file"
     description = "Create or overwrite a UTF-8 text file in the workspace."
+    mutates_workspace = True
     parameters = {
         "type": "object",
         "properties": {

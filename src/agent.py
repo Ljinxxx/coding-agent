@@ -35,6 +35,14 @@ class AgentContextLimitError(RuntimeError):
 
 
 class Agent:
+    _VERIFICATION_REQUIRED_FEEDBACK = (
+        "[Verification Required]\n"
+        "The workspace has changed since the last successful verification.\n"
+        "You must call {tool_name} and obtain a successful result before "
+        "completing the task.\n"
+        "This is harness-generated control feedback, not a new user request."
+    )
+
     def __init__(
         self,
         llm_client: Any,
@@ -43,12 +51,21 @@ class Agent:
         verbose: bool = False,
         max_steps: int = 20,
         max_context_chars: int | None = None,
+        verification_tool_name: str | None = None,
     ) -> None:
         if max_steps < 1:
             raise ValueError("max_steps must be at least 1.")
         if max_context_chars is not None and max_context_chars < 1:
             raise ValueError(
                 "max_context_chars must be greater than 0 or None."
+            )
+        if (
+            verification_tool_name is not None
+            and verification_tool_name not in tool_registry.names()
+        ):
+            raise ValueError(
+                "Verification tool "
+                f"'{verification_tool_name}' is not registered."
             )
 
         self.llm_client = llm_client
@@ -57,12 +74,27 @@ class Agent:
         self.verbose = verbose
         self.max_steps = max_steps
         self.max_context_chars = max_context_chars
+        self.verification_tool_name = verification_tool_name
         self.parser = ResponseParser()
         self._messages = self._create_initial_history()
+        self._workspace_revision = 0
+        self._verified_revision = 0
 
     @property
     def history(self) -> list[dict[str, Any]]:
         return deepcopy(self._messages)
+
+    @property
+    def workspace_revision(self) -> int:
+        return self._workspace_revision
+
+    @property
+    def verified_revision(self) -> int:
+        return self._verified_revision
+
+    @property
+    def verification_required(self) -> bool:
+        return self._workspace_revision != self._verified_revision
 
     def reset_history(self) -> None:
         self._messages = self._create_initial_history()
@@ -148,6 +180,14 @@ class Agent:
 
         return deepcopy(context_messages)
 
+    def _verification_succeeded(self, result: str) -> bool:
+        try:
+            payload = json.loads(result)
+        except (json.JSONDecodeError, TypeError):
+            return False
+
+        return isinstance(payload, dict) and payload.get("ok") is True
+
     def run(self, user_input: str) -> str:
         self._messages.append(
             {
@@ -182,6 +222,24 @@ class Agent:
                         "content": parsed.content,
                     }
                 )
+                if (
+                    self.verification_tool_name is not None
+                    and self.verification_required
+                ):
+                    feedback = self._VERIFICATION_REQUIRED_FEEDBACK.format(
+                        tool_name=self.verification_tool_name
+                    )
+                    self._messages.append(
+                        {
+                            "role": "user",
+                            "content": feedback,
+                        }
+                    )
+                    self._log("Completion Gate：需要成功验证后才能结束")
+                    if step < self.max_steps:
+                        self._log("再次调用模型")
+                    continue
+
                 return parsed.content
 
             self._messages.append(
@@ -214,10 +272,18 @@ class Agent:
 
                 try:
                     tool = self.tool_registry.get(tool_call.name)
+                    if tool.mutates_workspace:
+                        self._workspace_revision += 1
                     result = tool.execute(**tool_call.arguments)
                 except Exception as error:
                     self._log(f"工具执行失败：{tool_call.name}")
                     result = _format_tool_error(tool_call.name, error)
+
+                if (
+                    tool_call.name == self.verification_tool_name
+                    and self._verification_succeeded(result)
+                ):
+                    self._verified_revision = self._workspace_revision
 
                 self._log(f"工具结果：{result}")
                 self._messages.append(

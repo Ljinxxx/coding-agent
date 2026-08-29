@@ -111,7 +111,7 @@
 - Stage 6 回归验证：6 项测试全部通过。
 - 完整回归验证命令：`python -m pytest -v --basetemp=.pytest_tmp`
 - 完整回归验证结果：51 项测试全部通过。
-- 计划由用户后续手工保存的验证截图：`stage10_context_management.png`、`stage10_context_management_manual.png`、`stage10_context_management_real_llm.png`；本次未生成或伪造截图文件。
+手工保存的验证截图：`stage10_context_management.png`、`stage10_context_management_manual.png`、`stage10_context_management_real_llm.png`
 
 ## 第十一阶段：工作区安全边界
 
@@ -132,4 +132,27 @@
 - Stage 10 Context 回归验证：7 项测试全部通过。
 - 完整回归验证命令：`python -m pytest -v --basetemp=.pytest_tmp`
 - 完整回归验证结果：58 项测试全部通过。
-- 计划由用户后续手工保存的验证截图：`stage11_workspace_safety.png`、`stage11_workspace_safety_manual.png`、`stage11_workspace_safety_real_llm.png`；本次未生成或伪造截图文件。
+手工保存的验证截图：`stage11_workspace_safety.png`、`stage11_workspace_safety_manual.png`、`stage11_workspace_safety_real_llm.png`
+
+## 第十二阶段：验证闭环机制
+
+- 验证目标：在 Agent 观察到 Workspace 发生可能改变状态的操作后建立 Completion Gate，禁止模型在最后一次修改尚未通过宿主程序预设验证标准时直接结束任务。
+- Host-controlled Verification：新增 `verify_workspace`；验证命令在构造工具时由宿主程序预先配置，Tool Schema 不接受 `command` 参数，模型只能决定何时调用验证，不能改变完成标准。
+- Verification Result：工具从 canonical Workspace Root 依次执行真实命令并返回结构化 JSON，保留每项检查的 `command`、`exit_code`、`stdout`、`stderr` 和 `timed_out`；采用 fail-fast，只有全部配置命令退出码为 0 且均未超时时 `ok=true`。
+- Workspace Revision：Agent 实例跟踪 `workspace_revision` 与 `verified_revision`。初始状态二者均为 0；mutation-capable Tool 一旦准备执行就保守增加 Workspace Revision，即使工具随后失败或超时也不回滚。
+- Mutation Metadata：`write_file` 和普通 `run_command` 标记为可能修改 Workspace；`read_file`、`list_directory` 和 `verify_workspace` 保持只读元数据。成功 Verification 后再次执行 mutation-capable Tool 会立即使旧验证失效。
+- Completion Gate：该能力通过 `verification_tool_name` 显式启用，默认 `None`，因此 Stage 1～11 的旧 Agent 行为保持兼容。启用后如果两个 Revision 不相等，无 Tool Call 的提前 Final 会被保存到完整 History，随后 Agent 追加合法 `user` 角色的 `[Verification Required]` Harness 控制反馈，并继续现有 Agent Loop。
+- 状态与终止：Gate 后的下一次模型调用仍计入 Stage 7 `max_steps`，每次调用前仍重新经过 Stage 10 Context Builder；Verification State 跨同一 Agent 的多次 `run()` 保留，`reset_history()` 和 Agent Error 不会回滚 Workspace Revision。
+- 失败恢复：Verification nonzero 或 timeout 是正常的 `ok=false` Tool Result，会返回模型继续修复；工具自身异常仍复用 Stage 8 Tool Error Result，不自动 rollback Workspace。
+- Shell 说明：普通 `run_command` 即使退出码为 0 也不具有 Completion Authority，反而会使旧验证失效；只有 Host-controlled `verification_tool_name` 对应工具返回 JSON object 且 `ok` 严格为 `true` 时才更新 `verified_revision`。Verification 继承 Stage 11 的 canonical cwd，但仍不等同于 OS-level Sandbox。
+- 自动化验证命令：`python -m pytest tests/test_agent_verification.py -v --basetemp=.pytest_tmp`
+- 自动化验证结果：严格 7 项 Stage 12 测试全部通过。
+- Fake LLM 验证命令：`python -m scripts.verify_agent_verification`
+- Fake 验证结果：Fake LLM 通过真实 `WriteFileTool` 写入错误实现后故意提前 Final，Completion Gate 主动阻止；第一次 Host-controlled 真实 pytest 验证以退出码 1 失败，失败结果返回 Fake LLM 后继续真实修复，第二次 pytest 以退出码 0 成功，最终 `workspace_revision=2`、`verified_revision=2` 后才允许 Final；Agent 完成后的 Host 独立复验同样通过，临时 Workspace 已清理。
+- 真实模型验证命令：`python -m scripts.verify_agent_verification_real`
+- 真实模型验证状态：脚本已经实现真实 `LLMClient + RecordingLLM + Agent + File Tools + VerifyWorkspaceTool` 流程以及 Tool Call 顺序、Mutation/Verification/Final 顺序、成功结果进入真实模型 Context、最终 CLEAN 状态和 Host 独立复验等程序化检查；本次命令已尝试运行，但在首个真实 API 请求建立连接时受到当前 Codex 沙箱与执行策略限制，未获得真实模型响应或 Real LLM 成功结果，因此没有记录或声称 Real LLM 验证成功，需在用户本地 Windows 环境运行上述命令。
+- 完整回归命令：`python -m pytest -v --basetemp=.pytest_tmp`
+- 完整回归结果：65 项测试全部通过。
+- 保存的验证截图：`stage12_verification_loop.png`、`stage12_verification_loop_manual_1.png`、`stage12_verification_loop_manual_2.png``stage12_verification_loop_real_llm_1.png`
+`stage12_verification_loop_real_llm_2.png`、`stage12_full_regression.png`
+
