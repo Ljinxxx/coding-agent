@@ -1,5 +1,6 @@
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -9,7 +10,10 @@ from src.tools.shell import RunCommandTool
 
 
 def make_python_command(code: str) -> str:
-    return subprocess.list2cmdline([sys.executable, "-c", code])
+    parts = [sys.executable, "-c", code]
+    if os.name == "nt":
+        return subprocess.list2cmdline(parts)
+    return shlex.join(parts)
 
 
 def paths_match(first: str | Path, second: str | Path) -> bool:

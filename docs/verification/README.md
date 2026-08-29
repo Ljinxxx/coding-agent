@@ -156,3 +156,24 @@
 - 保存的验证截图：`stage12_verification_loop.png`、`stage12_verification_loop_manual_1.png`、`stage12_verification_loop_manual_2.png``stage12_verification_loop_real_llm_1.png`
 `stage12_verification_loop_real_llm_2.png`、`stage12_full_regression.png`
 
+## P0.5：正式入口配置收尾
+
+- 默认运行：`python -m src.main`
+- 自定义 Workspace：`python -m src.main --workspace ./demo`
+- Context Budget：`--max-context-chars 60000` 控制发送给模型的字符数量代理预算，必须是正整数；它不是精确 Token Budget。
+- Host-controlled Verification：使用可重复的 `--verify "COMMAND"` 配置一项或多项验证命令，例如 `python -m src.main --workspace ./demo --verify "python -m pytest -q"`。命令由用户或 Host 提供并按顺序执行；`verify_workspace` 的 Tool Arguments 不暴露命令参数，因此模型不能传入或替换验证命令，实际执行命令只会作为 Verification Result 的审计字段返回。
+- 默认 Verification 行为：未提供 `--verify` 时，正式入口不注册 `verify_workspace` 且不启用 Completion Gate，也不会自动运行 pytest 或猜测项目类型。
+- Shell 边界：Host 提供的验证字符串由当前操作系统 Shell 执行，并以 canonical Workspace 为 `cwd`；该机制不是 OS-level Sandbox。
+- 正式入口自动化测试：`python -m pytest tests/test_main.py -v`，结果为 7 项测试全部通过。
+- P0.5 完整回归：72 项测试全部通过。
+
+## P1：EditFileTool 精确局部修改
+
+- `edit_file` 的 Schema 仅包含必填字符串参数 `path`、`old_text`、`new_text`，并设置 `additionalProperties: false`；它只编辑 Workspace 内已存在的 UTF-8 普通文件。
+- `old_text` 必须非空并且只有一个匹配位置：零次或多次匹配均报错且不写盘；`new_text` 可以为空以删除唯一片段；相同的新旧文本会返回 no-op 且不重写文件。
+- 路径继续复用现有 `resolve_workspace_path()`，测试覆盖父路径、Workspace 外绝对路径以及 symlink/Windows junction 逃逸，均不能修改外部文件。
+- 正式 `build_agent()` 按 `list_directory`、`read_file`、`edit_file`、`write_file`、`run_command` 的顺序注册基础工具。`edit_file.mutates_workspace = True`，因此无需修改 Agent 或 Verification 架构即可进入现有 revision 与 Completion Gate 流程。
+- Fake LLM 集成验证覆盖 `read_file → edit_file → premature Final → Completion Gate → verify_workspace → Final`，同时验证未配置 Verification 时仍可正常局部编辑并结束。
+- 完整回归命令：`python -m pytest -q`；结果：`86 passed in 7.43s`。
+- 编译检查命令：`python -m compileall src`；结果：通过。
+- 真实模型 smoke 使用仅含合成 `calculator.py` 和单项测试的隔离 Workspace，实际流程为 `read_file → edit_file → verify_workspace → Final`；模型把唯一的 `return a - b` 修改为 `return a + b`，Host 验证与独立复验均为 `1 passed`。

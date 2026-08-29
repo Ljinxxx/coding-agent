@@ -1,4 +1,6 @@
 import json
+import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -97,8 +99,9 @@ def test_run_command_starts_in_canonical_workspace(tmp_path: Path) -> None:
     workspace.mkdir()
     (workspace / "nested").mkdir()
     noncanonical_workspace = workspace / "nested" / ".."
-    command = subprocess.list2cmdline(
-        [sys.executable, "-c", "import os; print(os.getcwd())"]
+    parts = [sys.executable, "-c", "import os; print(os.getcwd())"]
+    command = (
+        subprocess.list2cmdline(parts) if os.name == "nt" else shlex.join(parts)
     )
 
     result = json.loads(
