@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Any
 
 from src.tools.base import BaseTool
+from src.tools.path_utils import resolve_workspace_path
 
 
 class ListDirectoryTool(BaseTool):
@@ -12,18 +13,18 @@ class ListDirectoryTool(BaseTool):
         "properties": {
             "path": {
                 "type": "string",
-                "description": "Directory path relative to the workspace.",
+                "description": "Directory path within the workspace.",
             },
         },
         "required": ["path"],
     }
 
     def __init__(self, workspace: Path) -> None:
-        self.workspace = workspace
+        self.workspace = Path(workspace).resolve(strict=False)
 
     def execute(self, **kwargs: Any) -> str:
         path = str(kwargs["path"])
-        target = self.workspace / path
+        target = resolve_workspace_path(self.workspace, path)
 
         if not target.exists():
             raise FileNotFoundError(f"Directory not found: {path}")
@@ -45,18 +46,18 @@ class ReadFileTool(BaseTool):
         "properties": {
             "path": {
                 "type": "string",
-                "description": "File path relative to the workspace.",
+                "description": "File path within the workspace.",
             },
         },
         "required": ["path"],
     }
 
     def __init__(self, workspace: Path) -> None:
-        self.workspace = workspace
+        self.workspace = Path(workspace).resolve(strict=False)
 
     def execute(self, **kwargs: Any) -> str:
         path = str(kwargs["path"])
-        target = self.workspace / path
+        target = resolve_workspace_path(self.workspace, path)
 
         if not target.exists():
             raise FileNotFoundError(f"File not found: {path}")
@@ -75,7 +76,7 @@ class WriteFileTool(BaseTool):
         "properties": {
             "path": {
                 "type": "string",
-                "description": "File path relative to the workspace.",
+                "description": "File path within the workspace.",
             },
             "content": {
                 "type": "string",
@@ -86,12 +87,12 @@ class WriteFileTool(BaseTool):
     }
 
     def __init__(self, workspace: Path) -> None:
-        self.workspace = workspace
+        self.workspace = Path(workspace).resolve(strict=False)
 
     def execute(self, **kwargs: Any) -> str:
         path = str(kwargs["path"])
         content = str(kwargs["content"])
-        target = self.workspace / path
+        target = resolve_workspace_path(self.workspace, path)
 
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")

@@ -40,7 +40,7 @@ class RunCommandTool(BaseTool):
     }
 
     def __init__(self, workspace: Path) -> None:
-        self.workspace = workspace
+        self.workspace = Path(workspace).resolve(strict=False)
 
     def execute(self, **kwargs: Any) -> str:
         command = str(kwargs["command"])

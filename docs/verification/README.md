@@ -112,3 +112,24 @@
 - 完整回归验证命令：`python -m pytest -v --basetemp=.pytest_tmp`
 - 完整回归验证结果：51 项测试全部通过。
 - 计划由用户后续手工保存的验证截图：`stage10_context_management.png`、`stage10_context_management_manual.png`、`stage10_context_management_real_llm.png`；本次未生成或伪造截图文件。
+
+## 第十一阶段：工作区安全边界
+
+- 验证目标：验证文件类工具通过 canonical path resolution 和 Workspace containment check 限制文件操作范围，阻止 `../` 路径穿越以及 Workspace 外绝对路径访问，同时保证正常 Workspace 内路径仍可使用。
+- 文件工具安全边界：`list_directory`、`read_file`、`write_file` 均只能访问 canonical Workspace Root 内路径；Workspace 内相对路径和绝对路径均可使用，包含 `..` 但规范化后仍位于 Workspace 内的路径也可正常访问。
+- 符号链接：路径检查基于 `Path.resolve(strict=False)` 得到的 canonical path，能够从设计上阻止已有 symlink 将文件工具重定向到 Workspace 外；固定 7 项测试不依赖 Windows symlink 创建权限。
+- Shell 边界：`run_command` 固定从 canonical Workspace Root 作为 `cwd` 启动，但该机制不是操作系统级 Sandbox，任意 Shell 命令理论上仍可能显式访问宿主机其他路径。
+- 自动化验证命令：`python -m pytest tests/test_workspace_safety.py -v --basetemp=.pytest_tmp`
+- 自动化验证结果：7 项测试全部通过。
+- 人工验证命令：`python -m scripts.verify_workspace_safety`
+- 人工验证结果：Fake LLM 首先通过 `read_file` 请求真实存在的 Workspace 外随机文件，真实文件工具以 `WorkspaceBoundaryError` 主动拒绝；错误经 Agent 作为 Tool Error Result 返回后，Fake LLM 继续调用 `list_directory` 发现并读取 Workspace 内随机安全文件，外部 secret 内容未进入 Tool Result、History、LLM Context 或最终回答。
+- 真实模型集成验证命令：`python -m scripts.verify_workspace_safety_real`
+- 真实模型集成验证结果：真实模型首先尝试访问真实存在的 Workspace 外随机文件，收到结构化 `WorkspaceBoundaryError` 后调用 `list_directory` 重新检查 Workspace，并通过 `read_file` 成功读取实际发现的随机安全文件；外部 secret 内容未进入任何 Tool Result 或最终模型回答。
+- Stage 4 文件工具回归验证：8 项测试全部通过。
+- Stage 5 Shell 工具回归验证：6 项测试全部通过。
+- Stage 8 Error Handling 回归验证：5 项测试全部通过。
+- Stage 9 History 回归验证：6 项测试全部通过。
+- Stage 10 Context 回归验证：7 项测试全部通过。
+- 完整回归验证命令：`python -m pytest -v --basetemp=.pytest_tmp`
+- 完整回归验证结果：58 项测试全部通过。
+- 计划由用户后续手工保存的验证截图：`stage11_workspace_safety.png`、`stage11_workspace_safety_manual.png`、`stage11_workspace_safety_real_llm.png`；本次未生成或伪造截图文件。
