@@ -218,3 +218,24 @@
 - 兼容回归：Stage 9 / Stage 10 / Stage 12 与正式入口相关的 35 项测试全部通过。
 - 完整回归命令：`python -m pytest -v --basetemp=.pytest_tmp`；结果：102 项测试全部通过（P1-3 开发前基线 94 项，本阶段严格新增 8 项）。
 - 建议截图命名（本次未生成截图）：`p1_3_context_compaction.png`、`p1_3_context_compaction_manual_1.png`、`p1_3_context_compaction_manual_2.png`、`p1_3_context_compaction_real_llm_1.png`、`p1_3_context_compaction_real_llm_2.png`、`p1_3_full_regression.png`。
+
+## P1-4：统一 Tool Execution Result / Error Boundary
+
+- 目标：将 Tool Registry 解析、本地工具执行、普通运行时异常捕获和模型可见 Structured Tool Error 集中到单一 Harness 执行边界；Parser 与 LLM API 错误继续位于更高层边界。
+- Internal Result：Harness 内部使用冻结的 `ToolExecutionResult(tool_name, content, execution_ok, error_type)`；`execution_ok` 仅表示 Registered Tool 是否正常返回，不表示命令、验证或任务的 Domain Success。该内部结构不会直接发送给模型。
+- One Call / One Result：每个已解析 Tool Call 都产生且只产生一个对应 `role=tool` Result，沿用模型给出的原始 `tool_call_id`；Provider message 仍只有 `role`、`tool_call_id` 与 `content`。
+- Unknown Tool：未注册工具被规范化为 `error_type=UnknownTool` 的稳定 JSON Tool Error，不修改 Workspace Revision，也不让 Registry exception 终止 Agent Loop。
+- Runtime Exception：Registered Tool 抛出的普通 `Exception` 被转换为原有四字段 JSON Tool Error；只包含 tool、异常类型和消息，不泄漏 Python traceback。`BaseException` 控制异常不被捕获。
+- Domain Result：`run_command` 非零退出、timeout 和 `verify_workspace` 的 `ok=false` 都是 `execution_ok=true` 的普通 Tool Result；各 Tool 的既有业务 content 原样透传，不增加统一业务 envelope。
+- Multi-Call：同一响应中的多个 Tool Calls 继续按模型原始顺序串行执行；一个 Unknown Tool 或 Runtime Error 不会跳过同批后续 sibling call。
+- Stage 8 Compatibility：LLM API error、Model/Parser error、Tool Execution error 仍分别进入 `AgentLLMError`、`AgentResponseError`、model-facing Structured Tool Error；不自动重试 Tool。
+- P1-2 Compatibility：Read/Shell Output Budget 仍由各 Tool 在正常返回前完成，P1-4 不进行二次截断或重新序列化。
+- P1-3 Compatibility：Tool Result 进入 Full History 后继续作为对应 Tool Call 的原子 ContextUnit；Raw 与 Compacted 路径和预算算法未修改。
+- Stage 12 Compatibility：Registered mutating tool 在实际执行前继续保守增加 `workspace_revision`，因此即使随后抛异常也会保持 DIRTY；Unknown Tool 不触发 mutation bookkeeping。Verify PASS 才同步 `verified_revision`，Verify FAIL 或 Verify Runtime Exception 均不会错误标记已验证，Completion Gate 原语义保持。
+- 专项测试命令：`python -m pytest tests/test_tool_execution.py -v --basetemp=.pytest_tmp`；结果：严格 8 项测试全部通过，覆盖 success、unknown、runtime、one-call-one-result、multi-call、Shell domain failure、mutating exception 和 Verification Gate。
+- 相关回归：`python -m pytest tests/test_agent_error_handling.py tests/test_agent_verification.py tests/test_tool_output_budget.py tests/test_context_compaction.py -v --basetemp=.pytest_tmp`；结果：Stage 8、Stage 12、P1-2 与 P1-3 共 28 项测试全部通过。
+- Fake LLM 验证命令：`python -m scripts.verify_tool_execution`；结果：同批 `echo_demo → ghost_tool → fail_demo` 依次产生 normal / UnknownTool / RuntimeError Results，错误未阻断 sibling；下一轮真实 `ReadFileTool` 读取随机目标并完成恢复。Tool Result ID、数量、顺序、下一轮 messages、Full History、无 traceback、无内部字段泄漏和临时目录清理全部验证通过。
+- 真实模型验证命令：`python -m scripts.verify_tool_execution_real`；结果：`DeepSeek-V4-Flash` 通过真实 `LLMClient` 恰好完成 3 次调用，严格执行 `fail_demo → read_file → Final`。RuntimeError Result 进入下一次真实 API messages，随机 `TARGET_MARKER` 首次来自真实 Read Tool Result，模型最终精确返回完整 marker，临时 Workspace 已清理。
+- 正式入口：`python -m src.main --help` 通过；保留 `workspace`、Context、Verification 与 `--compact-context` 参数，没有新增 P1-4 CLI flag，也没有将验证专用 Demo Tools 注册到正式 Tool List。
+- 完整回归命令：`python -m pytest -v --basetemp=.pytest_tmp`；结果：110 项测试全部通过（P1-4 开发前真实 baseline 102 项，本阶段严格新增 8 项）。
+- 建议截图命名（本次未生成截图）：`p1_4_tool_execution.png`、`p1_4_tool_execution_manual.png`、`p1_4_tool_execution_real_llm_1.png`、`p1_4_tool_execution_real_llm_2.png`、`p1_4_full_regression.png`。

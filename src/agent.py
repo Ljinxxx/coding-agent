@@ -7,19 +7,9 @@ from src.context_compaction import (
     estimate_messages_size,
 )
 from src.parser import ResponseParser
+from src.tool_execution import ToolExecutor
+from src.tools.base import BaseTool
 from src.tools.registry import ToolRegistry
-
-
-def _format_tool_error(tool_name: str, error: Exception) -> str:
-    return json.dumps(
-        {
-            "ok": False,
-            "tool": tool_name,
-            "error_type": type(error).__name__,
-            "message": str(error),
-        },
-        ensure_ascii=False,
-    )
 
 
 class AgentMaxStepsError(RuntimeError):
@@ -109,6 +99,7 @@ class Agent:
 
         self.llm_client = llm_client
         self.tool_registry = tool_registry
+        self.tool_executor = ToolExecutor(tool_registry)
         self.system_prompt = system_prompt
         self.verbose = verbose
         self.max_steps = max_steps
@@ -273,6 +264,10 @@ class Agent:
 
         return isinstance(payload, dict) and payload.get("ok") is True
 
+    def _before_tool_execution(self, tool: BaseTool) -> None:
+        if tool.mutates_workspace:
+            self._workspace_revision += 1
+
     def run(self, user_input: str) -> str:
         current_user_index = len(self._messages)
         self._messages.append(
@@ -358,17 +353,18 @@ class Agent:
                     + json.dumps(tool_call.arguments, ensure_ascii=False)
                 )
 
-                try:
-                    tool = self.tool_registry.get(tool_call.name)
-                    if tool.mutates_workspace:
-                        self._workspace_revision += 1
-                    result = tool.execute(**tool_call.arguments)
-                except Exception as error:
+                execution_result = self.tool_executor.execute(
+                    tool_call.name,
+                    tool_call.arguments,
+                    before_execute=self._before_tool_execution,
+                )
+                if not execution_result.execution_ok:
                     self._log(f"工具执行失败：{tool_call.name}")
-                    result = _format_tool_error(tool_call.name, error)
+                result = execution_result.content
 
                 if (
-                    tool_call.name == self.verification_tool_name
+                    execution_result.execution_ok
+                    and tool_call.name == self.verification_tool_name
                     and self._verification_succeeded(result)
                 ):
                     self._verified_revision = self._workspace_revision

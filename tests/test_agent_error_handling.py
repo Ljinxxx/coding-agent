@@ -119,7 +119,7 @@ def test_unknown_tool_error_is_sent_back_to_model() -> None:
     assert set(error_result) == {"ok", "tool", "error_type", "message"}
     assert error_result["ok"] is False
     assert error_result["tool"] == "unknown_tool"
-    assert error_result["error_type"] == "KeyError"
+    assert error_result["error_type"] == "UnknownTool"
     assert error_result["message"]
 
 
