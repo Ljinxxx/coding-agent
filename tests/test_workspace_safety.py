@@ -12,6 +12,10 @@ from src.tools.path_utils import WorkspaceBoundaryError
 from src.tools.shell import RunCommandTool
 
 
+def read_payload(result: str) -> str:
+    return result.split("\n\n", 1)[1]
+
+
 def test_read_file_allows_paths_inside_workspace(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -19,8 +23,10 @@ def test_read_file_allows_paths_inside_workspace(tmp_path: Path) -> None:
     safe_file.write_text("stage11-safe", encoding="utf-8")
     tool = ReadFileTool(workspace)
 
-    assert tool.execute(path="safe.txt") == "stage11-safe"
-    assert tool.execute(path=str(safe_file.resolve())) == "stage11-safe"
+    assert read_payload(tool.execute(path="safe.txt")) == "stage11-safe"
+    assert read_payload(tool.execute(path=str(safe_file.resolve()))) == (
+        "stage11-safe"
+    )
 
 
 def test_read_file_rejects_parent_path_escape(tmp_path: Path) -> None:
@@ -91,7 +97,7 @@ def test_normalized_path_inside_workspace_is_allowed(tmp_path: Path) -> None:
 
     result = ReadFileTool(workspace).execute(path="src/../safe.txt")
 
-    assert result == "stage11-normalized"
+    assert read_payload(result) == "stage11-normalized"
 
 
 def test_run_command_starts_in_canonical_workspace(tmp_path: Path) -> None:

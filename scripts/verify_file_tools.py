@@ -7,6 +7,13 @@ from src.tools.files import (
 )
 
 
+def parse_read_payload(result: str) -> str:
+    header, separator, payload = result.partition("\n\n")
+    if separator != "\n\n" or header.splitlines()[:1] != ["[read_file]"]:
+        raise RuntimeError("read_file Tool Result 缺少预期 metadata header。")
+    return payload
+
+
 def main() -> None:
     project_root = Path(__file__).resolve().parents[1]
 
@@ -40,7 +47,7 @@ def main() -> None:
     print(content)
 
     print("\n4. 验证结果")
-    if content == "hello stage4":
+    if parse_read_payload(content) == "hello stage4":
         print("Stage 4 文件写入与读取验证成功")
     else:
         raise RuntimeError("Stage 4 文件验证失败")

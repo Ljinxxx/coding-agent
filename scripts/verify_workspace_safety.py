@@ -23,6 +23,16 @@ def require(condition: bool, message: str) -> None:
         raise RuntimeError(message)
 
 
+def parse_read_payload(result: Any) -> str:
+    require(isinstance(result, str), "read_file Tool Result 必须是字符串。")
+    header, separator, payload = result.partition("\n\n")
+    require(
+        separator == "\n\n" and header.splitlines()[:1] == ["[read_file]"],
+        "read_file Tool Result 缺少预期 metadata header。",
+    )
+    return payload
+
+
 def text_response(content: str) -> SimpleNamespace:
     return SimpleNamespace(content=content, tool_calls=None)
 
@@ -253,7 +263,7 @@ class FakeLLM:
             isinstance(content, str) and bool(content),
             "安全文件的真实 Tool Result 不能为空。",
         )
-        self.observed_safe_content = content
+        self.observed_safe_content = parse_read_payload(content)
         self.safe_read_feedback_checked = True
 
 
@@ -401,7 +411,7 @@ def main() -> None:
             "安全文件 Tool Result 的 tool_call_id 不正确。",
         )
         require(
-            history[6].get("content") == safe_token,
+            parse_read_payload(history[6].get("content")) == safe_token,
             "真实 ReadFileTool 没有返回安全文件的随机 token。",
         )
 

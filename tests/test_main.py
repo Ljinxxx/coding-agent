@@ -91,6 +91,10 @@ def tool_content(agent: Agent, call_id: str) -> str:
     return str(message["content"])
 
 
+def read_payload(result: str) -> str:
+    return result.split("\n\n", 1)[1]
+
+
 def reject_real_client() -> None:
     raise AssertionError("The integration test must not create a real LLM client.")
 
@@ -150,11 +154,10 @@ def test_main_runs_read_only_agent_with_default_context_and_no_verification(
         "name": "read_file",
         "arguments": json.dumps({"path": "hello.txt"}),
     }
-    assert fake_llm.calls[1]["messages"][-1] == {
-        "role": "tool",
-        "tool_call_id": "read-call",
-        "content": token,
-    }
+    read_message = fake_llm.calls[1]["messages"][-1]
+    assert read_message["role"] == "tool"
+    assert read_message["tool_call_id"] == "read-call"
+    assert read_payload(read_message["content"]) == token
 
     captured = capsys.readouterr()
     assert captured.err == ""
@@ -268,7 +271,7 @@ def test_formal_agent_blocks_final_until_host_verification_succeeds(
         "def add(a, b):\n    return a + b\n"
     )
     assert agent.workspace_revision == agent.verified_revision == 1
-    assert tool_content(agent, "read") == (
+    assert read_payload(tool_content(agent, "read")) == (
         "def add(a, b):\n    return a - b\n"
     )
     assert "replaced exactly one occurrence" in tool_content(agent, "edit")
@@ -347,11 +350,10 @@ def test_formal_agent_does_not_run_hidden_pytest_when_verification_is_disabled(
     assert agent.workspace_revision == 1
     assert agent.verified_revision == 0
     assert len(fake_llm.calls) == 3
-    assert fake_llm.calls[1]["messages"][-1] == {
-        "role": "tool",
-        "tool_call_id": "read",
-        "content": "pytest required",
-    }
+    read_message = fake_llm.calls[1]["messages"][-1]
+    assert read_message["role"] == "tool"
+    assert read_message["tool_call_id"] == "read"
+    assert read_payload(read_message["content"]) == "pytest required"
     assert "replaced exactly one occurrence" in (
         fake_llm.calls[2]["messages"][-1]["content"]
     )

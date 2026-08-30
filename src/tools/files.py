@@ -5,6 +5,16 @@ from src.tools.base import BaseTool
 from src.tools.path_utils import resolve_workspace_path
 
 
+DEFAULT_READ_MAX_LINES = 200
+DEFAULT_READ_MAX_OUTPUT_CHARS = 20_000
+
+
+def _positive_integer(value: Any, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{name} must be a positive integer.")
+    return value
+
+
 class ListDirectoryTool(BaseTool):
     name = "list_directory"
     description = "List the direct contents of a directory in the workspace."
@@ -40,7 +50,9 @@ class ListDirectoryTool(BaseTool):
 
 class ReadFileTool(BaseTool):
     name = "read_file"
-    description = "Read a UTF-8 text file from the workspace."
+    description = (
+        "Read a bounded, pageable UTF-8 text window from a workspace file."
+    )
     parameters = {
         "type": "object",
         "properties": {
@@ -48,12 +60,37 @@ class ReadFileTool(BaseTool):
                 "type": "string",
                 "description": "File path within the workspace.",
             },
+            "start_line": {
+                "type": "integer",
+                "description": "1-based line number at which reading starts.",
+                "minimum": 1,
+            },
+            "max_lines": {
+                "type": "integer",
+                "description": "Maximum number of consecutive lines to read.",
+                "minimum": 1,
+            },
         },
         "required": ["path"],
+        "additionalProperties": False,
     }
 
-    def __init__(self, workspace: Path) -> None:
+    def __init__(
+        self,
+        workspace: Path,
+        *,
+        default_max_lines: int = DEFAULT_READ_MAX_LINES,
+        max_output_chars: int = DEFAULT_READ_MAX_OUTPUT_CHARS,
+    ) -> None:
         self.workspace = Path(workspace).resolve(strict=False)
+        self.default_max_lines = _positive_integer(
+            default_max_lines,
+            "default_max_lines",
+        )
+        self.max_output_chars = _positive_integer(
+            max_output_chars,
+            "max_output_chars",
+        )
 
     def execute(self, **kwargs: Any) -> str:
         path = str(kwargs["path"])
@@ -65,7 +102,98 @@ class ReadFileTool(BaseTool):
         if not target.is_file():
             raise IsADirectoryError(f"Not a file: {path}")
 
-        return target.read_text(encoding="utf-8")
+        start_line = _positive_integer(
+            kwargs.get("start_line", 1),
+            "start_line",
+        )
+        max_lines = _positive_integer(
+            kwargs.get("max_lines", self.default_max_lines),
+            "max_lines",
+        )
+        window_end = start_line + max_lines
+        total_lines = 0
+        complete_end: int | None = None
+        first_unreturned_line: int | None = None
+        original_selected_chars = 0
+        payload_chars = 0
+        payload_parts: list[str] = []
+        output_closed = False
+        char_truncated = False
+        partial_line = False
+
+        with target.open("r", encoding="utf-8") as file:
+            for line_number, line in enumerate(file, start=1):
+                total_lines = line_number
+                if not start_line <= line_number < window_end:
+                    continue
+
+                original_selected_chars += len(line)
+                if output_closed:
+                    continue
+
+                remaining_chars = self.max_output_chars - payload_chars
+                if len(line) <= remaining_chars:
+                    payload_parts.append(line)
+                    payload_chars += len(line)
+                    complete_end = line_number
+                    continue
+
+                char_truncated = True
+                output_closed = True
+                if complete_end is None:
+                    payload_parts.append(line[:remaining_chars])
+                    payload_chars += remaining_chars
+                    partial_line = True
+                else:
+                    first_unreturned_line = line_number
+
+        payload = "".join(payload_parts)
+        if complete_end is None:
+            line_range = "none"
+        else:
+            line_range = f"{start_line}-{complete_end} of {total_lines}"
+
+        truncated_before = total_lines > 0 and start_line > 1
+        truncated_after = (
+            partial_line
+            or first_unreturned_line is not None
+            or (complete_end is not None and complete_end < total_lines)
+        )
+        if partial_line:
+            next_start_line: int | str = "none"
+            notice = (
+                "first selected line exceeds character budget; partial line "
+                "returned; line-based continuation unavailable"
+            )
+        elif first_unreturned_line is not None:
+            next_start_line = first_unreturned_line
+            notice = (
+                "read payload stopped before an incomplete line; continue at "
+                "next_start_line"
+            )
+        else:
+            next_start_line = (
+                complete_end + 1
+                if complete_end is not None and complete_end < total_lines
+                else "none"
+            )
+            notice = "none"
+        header = "\n".join(
+            [
+                "[read_file]",
+                f"path: {path}",
+                f"lines: {line_range}",
+                f"total_lines: {total_lines}",
+                f"truncated_before: {str(truncated_before).lower()}",
+                f"truncated_after: {str(truncated_after).lower()}",
+                f"char_truncated: {str(char_truncated).lower()}",
+                f"partial_line: {str(partial_line).lower()}",
+                f"original_selected_chars: {original_selected_chars}",
+                f"next_start_line: {next_start_line}",
+                f"notice: {notice}",
+            ]
+        )
+        return f"{header}\n\n{payload}"
 
 
 class EditFileTool(BaseTool):

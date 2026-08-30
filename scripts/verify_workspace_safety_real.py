@@ -17,6 +17,16 @@ def require(condition: bool, message: str) -> None:
         raise RuntimeError(message)
 
 
+def parse_read_payload(result: Any) -> str:
+    require(isinstance(result, str), "read_file Tool Result 必须是字符串。")
+    header, separator, payload = result.partition("\n\n")
+    require(
+        separator == "\n\n" and header.splitlines()[:1] == ["[read_file]"],
+        "read_file Tool Result 缺少预期 metadata header。",
+    )
+    return payload
+
+
 class RecordingLLM:
     """真实调用 LLM，只额外记录每次发送给模型的 messages。"""
 
@@ -353,7 +363,7 @@ def main() -> None:
                 message.get("role") == "tool"
                 and message.get("tool_call_id") == safe_read_call_id
                 and isinstance(content, str)
-                and content.strip() == safe_token
+                and parse_read_payload(content) == safe_token
             ):
                 safe_result_index = message_index
                 break

@@ -5,6 +5,10 @@ import pytest
 from src.tools.files import ListDirectoryTool, ReadFileTool, WriteFileTool
 
 
+def read_payload(result: str) -> str:
+    return result.split("\n\n", 1)[1]
+
+
 def test_list_directory(tmp_path: Path) -> None:
     (tmp_path / "hello.txt").write_text("hello", encoding="utf-8")
     (tmp_path / "src").mkdir()
@@ -19,7 +23,7 @@ def test_read_file(tmp_path: Path) -> None:
 
     result = ReadFileTool(tmp_path).execute(path="hello.txt")
 
-    assert result == "hello stage4"
+    assert read_payload(result) == "hello stage4"
 
 
 def test_write_file(tmp_path: Path) -> None:
@@ -48,7 +52,7 @@ def test_write_then_read_file(tmp_path: Path) -> None:
 
     result = ReadFileTool(tmp_path).execute(path="hello.txt")
 
-    assert result == "hello stage4"
+    assert read_payload(result) == "hello stage4"
 
 
 def test_read_missing_file(tmp_path: Path) -> None:

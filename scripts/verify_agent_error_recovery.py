@@ -20,6 +20,16 @@ def require(condition: bool, message: str) -> None:
         raise RuntimeError(message)
 
 
+def parse_read_payload(result: Any) -> str:
+    require(isinstance(result, str), "read_file Tool Result 必须是字符串。")
+    header, separator, payload = result.partition("\n\n")
+    require(
+        separator == "\n\n" and header.splitlines()[:1] == ["[read_file]"],
+        "read_file Tool Result 缺少预期 metadata header。",
+    )
+    return payload
+
+
 def text_response(content: str) -> SimpleNamespace:
     return SimpleNamespace(content=content, tool_calls=None)
 
@@ -150,7 +160,7 @@ class FakeLLM:
             "第 3 轮成功反馈的 tool_call_id 不正确。",
         )
         require(
-            tool_message.get("content") == self.token,
+            parse_read_payload(tool_message.get("content")) == self.token,
             "第 3 轮未收到 correct.txt 中的真实随机 token。",
         )
         self.success_feedback_checked = True

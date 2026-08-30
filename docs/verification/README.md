@@ -177,3 +177,23 @@
 - 完整回归命令：`python -m pytest -q`；结果：`86 passed in 7.43s`。
 - 编译检查命令：`python -m compileall src`；结果：通过。
 - 真实模型 smoke 使用仅含合成 `calculator.py` 和单项测试的隔离 Workspace，实际流程为 `read_file → edit_file → verify_workspace → Final`；模型把唯一的 `return a - b` 修改为 `return a + b`，Host 验证与独立复验均为 `1 passed`。
+
+## P1-2：Read / Shell 输出预算与截断
+
+- 验证目标：在 Tool Result 进入 Full History 前控制单次文件读取和 Shell 输出规模，避免超大文件或命令输出直接污染上下文。
+- Read 分页：`read_file` 支持 1-based `start_line` 与 `max_lines`；默认 `start_line=1`，正式 Agent 的 Host 默认行窗口为 200 行。超出 EOF 时返回带总行数的空窗口，而不是抛出分页异常。
+- Read Hard Budget：正式 Agent 的 Host 字符预算为 20,000 字符，约束文件内容 payload；固定的小型 metadata header 不计入 payload 预算。模型 Schema 不暴露 `max_output_chars`，即使单行极长也不能绕过预算。
+- Read Metadata：返回路径、实际行范围、总行数、前后截断状态、字符截断状态、`partial_line`、原始选中字符数和 `next_start_line`。实现保持流式扫描，不把完整大文件保存在内存列表中；`original_selected_chars` 始终统计整个实际请求行窗口。普通多行读取只返回完整行：下一完整行放不下时不返回该行的局部内容，`lines` 停在最后一条完整行，`next_start_line` 指向首条未返回行。若所选第一行本身超过字符预算，则允许返回有界前缀，并明确报告 `partial_line=true`、`lines=none`、`next_start_line=none`，表示当前接口不提供字符级续读。
+- Shell Budget：`run_command` 对 stdout 和 stderr 独立应用同一个 Host-controlled 字符预算；正式 Agent 每个 stream 的默认预算为 20,000 字符，模型 Schema 仍只有 `command` 与 `timeout`。
+- Head/Tail：超预算 Shell 输出保留开头和结尾，中间插入包含 stream 名称与原始字符数的 truncation marker，marker 本身计入预算，最终单个 stream 长度不超过配置值。
+- Shell Metadata：保留 `exit_code`、`stdout`、`stderr`、`timed_out`，并增加 `stdout_truncated`、`stderr_truncated`、`stdout_original_chars` 与 `stderr_original_chars`。
+- 向后兼容：小文件和小 Shell 输出保持完整；nonzero exit 继续是普通 Tool Result；timeout 继续返回 `timed_out=true`，已捕获的 stdout/stderr 也经过相同预算处理。
+- Context 分层：P1-2 控制进入 Full History 前的单次 Tool Result；Stage 10 的 `_build_context_messages()` 与整体 Context Budget 未修改，二者职责独立。
+- Workspace Safety：Read 分页继续复用 Stage 11 `resolve_workspace_path()` canonical boundary；路径穿越和 Workspace 外绝对路径仍被拒绝。
+- Verification：`ReadFileTool.mutates_workspace=False`、`RunCommandTool.mutates_workspace=True` 与 `VerifyWorkspaceTool` 的成功判定保持不变，P1-2 不改变 Stage 12 Completion Gate 语义。
+- 专项测试命令：`python -m pytest tests/test_tool_output_budget.py -v --basetemp=.pytest_tmp`；结果：严格 8 项测试全部通过。Test 4 同时覆盖普通多行的完整行边界与下一页可恢复性，以及超长首行的有界局部返回和诚实 metadata。
+- Fake LLM 验证命令：`python -m scripts.verify_tool_output_budget`；结果：默认 Read 返回 1–120 / 1000 且不含后段随机目标，分页读取 976–1000 后恢复目标；真实 Shell stdout 从 12,154 字符截断为 800 字符并保留 Head/Tail，所有有界 Tool Result 均进入下一轮 messages 与 Full History，临时 Workspace 已清理。
+- Real LLM 验证命令：`python -m scripts.verify_tool_output_budget_real`；结果：DeepSeek-V4-Flash 使用真实 `LLMClient` 连续读取 6 个 150 行窗口，在实际第 798 行发现运行时随机 TARGET；随后仅执行 Host 提供的 Python 命令，stdout 从 24,171 字符截断为 600 字符并保留随机 Head/Tail。三类随机 marker 均由真实 Tool Result 获得，所有 Tool Result 均进入紧接着的真实 API messages，临时 Workspace 已清理。
+- 正式入口 smoke：`python -m src.main --workspace <synthetic-workspace>` 通过；真实模型使用 `read_file` 读取合成 token `P1-2-CLI-SMOKE=boundary-repair-ok` 并准确返回，没有修改文件或执行命令，临时 Workspace 已清理。
+- 完整回归命令：`python -m pytest -v --basetemp=.pytest_tmp`；结果：94 项测试全部通过（P1-2 开发前基线 86 项，本阶段严格新增 8 项；本次边界修复前后均为 94 项）。
+- 建议截图命名（本次未生成截图）：`p1_2_tool_output_budget.png`、`p1_2_tool_output_budget_manual_1.png`、`p1_2_tool_output_budget_manual_2.png`、`p1_2_tool_output_budget_real_llm_1.png`、`p1_2_tool_output_budget_real_llm_2.png`、`p1_2_full_regression.png`。

@@ -13,13 +13,15 @@ from src.agent import (
 )
 from src.llm import LLMClient
 from src.tools.files import (
+    DEFAULT_READ_MAX_LINES,
+    DEFAULT_READ_MAX_OUTPUT_CHARS,
     EditFileTool,
     ListDirectoryTool,
     ReadFileTool,
     WriteFileTool,
 )
 from src.tools.registry import ToolRegistry
-from src.tools.shell import RunCommandTool
+from src.tools.shell import DEFAULT_SHELL_MAX_OUTPUT_CHARS, RunCommandTool
 from src.tools.verification import VerifyWorkspaceTool
 
 
@@ -28,6 +30,8 @@ SYSTEM_PROMPT = (
     "Use the provided tools to inspect files, make changes, and run commands. "
     "Prefer edit_file for localized changes to existing files; use write_file "
     "for new files or complete replacements. "
+    "read_file supports 1-based start_line and max_lines; follow its metadata "
+    "to continue reading large files. "
     "Do not guess file contents or tool results. Return a concise final answer "
     "after completing the task."
 )
@@ -59,10 +63,21 @@ def build_agent(
     workspace_root = Path(workspace).expanduser().resolve(strict=False)
     registry = ToolRegistry()
     registry.register(ListDirectoryTool(workspace_root))
-    registry.register(ReadFileTool(workspace_root))
+    registry.register(
+        ReadFileTool(
+            workspace_root,
+            default_max_lines=DEFAULT_READ_MAX_LINES,
+            max_output_chars=DEFAULT_READ_MAX_OUTPUT_CHARS,
+        )
+    )
     registry.register(EditFileTool(workspace_root))
     registry.register(WriteFileTool(workspace_root))
-    registry.register(RunCommandTool(workspace_root))
+    registry.register(
+        RunCommandTool(
+            workspace_root,
+            max_output_chars=DEFAULT_SHELL_MAX_OUTPUT_CHARS,
+        )
+    )
 
     system_prompt = SYSTEM_PROMPT
     verification_tool_name: str | None = None
