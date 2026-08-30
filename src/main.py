@@ -41,6 +41,8 @@ VERIFICATION_PROMPT = (
     "answer; do not attempt to replace the configured checks."
 )
 DEFAULT_MAX_CONTEXT_CHARS = 60_000
+COMPACTION_TRIGGER_NUMERATOR = 3
+COMPACTION_RATIO_DENOMINATOR = 4
 
 
 def _positive_integer(value: str) -> int:
@@ -58,6 +60,7 @@ def build_agent(
     llm_client: Any | None = None,
     *,
     max_context_chars: int = DEFAULT_MAX_CONTEXT_CHARS,
+    compact_context: bool = False,
     verification_commands: Sequence[str] | None = None,
 ) -> Agent:
     workspace_root = Path(workspace).expanduser().resolve(strict=False)
@@ -89,6 +92,21 @@ def build_agent(
         verification_tool_name = VerifyWorkspaceTool.name
 
     client = llm_client if llm_client is not None else LLMClient()
+    compaction_trigger_chars = (
+        max(
+            1,
+            max_context_chars
+            * COMPACTION_TRIGGER_NUMERATOR
+            // COMPACTION_RATIO_DENOMINATOR,
+        )
+        if compact_context
+        else None
+    )
+    max_compaction_chars = (
+        max(1, max_context_chars // COMPACTION_RATIO_DENOMINATOR)
+        if compact_context
+        else None
+    )
     return Agent(
         client,
         registry,
@@ -96,6 +114,8 @@ def build_agent(
         verbose=True,
         max_steps=20,
         max_context_chars=max_context_chars,
+        compaction_trigger_chars=compaction_trigger_chars,
+        max_compaction_chars=max_compaction_chars,
         verification_tool_name=verification_tool_name,
     )
 
@@ -127,6 +147,14 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "verification is disabled when omitted."
         ),
     )
+    parser.add_argument(
+        "--compact-context",
+        action="store_true",
+        help=(
+            "Enable deterministic layered context compaction using "
+            "host-derived budgets."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -146,6 +174,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         agent = build_agent(
             workspace,
             max_context_chars=args.max_context_chars,
+            compact_context=args.compact_context,
             verification_commands=args.verification_commands,
         )
     except ValueError as error:

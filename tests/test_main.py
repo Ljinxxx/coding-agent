@@ -139,6 +139,8 @@ def test_main_runs_read_only_agent_with_default_context_and_no_verification(
     assert len(built_agents) == 1
     agent = built_agents[0]
     assert agent.max_context_chars == main_module.DEFAULT_MAX_CONTEXT_CHARS
+    assert agent.compaction_trigger_chars is None
+    assert agent.max_compaction_chars is None
     assert agent.tool_registry.names() == BASE_TOOL_NAMES
     assert agent.verification_tool_name is None
     assert "verify_workspace" not in str(agent.system_prompt)
@@ -192,6 +194,7 @@ def test_main_passes_custom_context_and_host_verification_commands(
             str(tmp_path),
             "--max-context-chars",
             "12345",
+            "--compact-context",
             "--verify",
             "host-check-one",
             "--verify",
@@ -202,6 +205,8 @@ def test_main_passes_custom_context_and_host_verification_commands(
     assert exit_code == 0
     agent = built_agents[0]
     assert agent.max_context_chars == 12345
+    assert agent.compaction_trigger_chars == 12345 * 3 // 4
+    assert agent.max_compaction_chars == 12345 // 4
     assert agent.tool_registry.names() == [*BASE_TOOL_NAMES, "verify_workspace"]
     assert agent.verification_tool_name == "verify_workspace"
     verifier = agent.tool_registry.get("verify_workspace")

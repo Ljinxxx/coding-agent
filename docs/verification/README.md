@@ -197,3 +197,24 @@
 - 正式入口 smoke：`python -m src.main --workspace <synthetic-workspace>` 通过；真实模型使用 `read_file` 读取合成 token `P1-2-CLI-SMOKE=boundary-repair-ok` 并准确返回，没有修改文件或执行命令，临时 Workspace 已清理。
 - 完整回归命令：`python -m pytest -v --basetemp=.pytest_tmp`；结果：94 项测试全部通过（P1-2 开发前基线 86 项，本阶段严格新增 8 项；本次边界修复前后均为 94 项）。
 - 建议截图命名（本次未生成截图）：`p1_2_tool_output_budget.png`、`p1_2_tool_output_budget_manual_1.png`、`p1_2_tool_output_budget_manual_2.png`、`p1_2_tool_output_budget_real_llm_1.png`、`p1_2_tool_output_budget_real_llm_2.png`、`p1_2_full_regression.png`。
+
+## P1-3：分层 Context Compaction
+
+- 验证目标：当 Full History 达到 Host 配置的 Trigger 后，为单次 LLM 请求构造有界的分层 Context View；早期信息转换为确定性摘要，真实 Current User 与最近连续 ContextUnits 保持原始协议结构，同时不破坏既有 Agent Loop。
+- Full History：`self._messages` 继续保存完整真实历史，是唯一事实来源。Harness-generated synthetic messages 只存在于当前 API Request View，不写回 History；`history` 深拷贝和 `reset_history()` 保持 Stage 9 原语义。
+- 配置与 Trigger：Agent 的 `compaction_trigger_chars` 与 `max_compaction_chars` 默认均为 `None`，因此默认继续使用 Stage 10 旧路径。正式入口通过 `--compact-context` 启用；Host 根据 `max_context_chars` 派生 75% Trigger 和 25% synthetic digest 总预算。完整 History 的稳定 JSON 字符数达到 Trigger 时才进入 Compaction。
+- Deterministic Compaction：摘要由 Harness 对 ContextUnit 做结构化、抽取式渲染和有界 Head/Tail 裁剪，不调用额外 LLM，不保存独立摘要状态；相同 History、Current User Anchor 与预算会生成完全相同的 Context。
+- Current User Anchor：`run()` 在追加真实用户消息前记录其精确 History index，并在该次循环的每次 LLM 调用中持续使用同一 index；Stage 12 的 `[Verification Required]` user-role Harness feedback 不会被误认成真实 Current User。
+- Layering：最终顺序为完整 System、Compacted Prior Context、可用的 prior raw 后缀、完整 Current User、Compacted Current-Run Progress、recent raw progress。所有非 Anchor ContextUnits 按全局时间顺序从最新向前选择连续 Raw 后缀，第一个放不下时停止，不跳过较新大 Unit 去保留更老小 Unit。
+- Tool Atomicity：一条 Assistant Tool Call 消息及其全部匹配 Tool Results 组成一个 ContextUnit；Raw 时整体保留原生协议，Compact 时整体转成普通 synthetic 文本，不会产生 orphan Tool Result。成功、Tool Error、`verify_workspace` 结果均使用相同规则。
+- Compaction Budget：最多两个 synthetic blocks 共享同一个 `max_compaction_chars` 内容预算；单项 User、Assistant、Tool Arguments 和 Tool Result 还有固定 Host preview 上限。最终 API messages 仍使用 Stage 10 的稳定 JSON 字符计数，并必须满足 `serialized_context_chars <= max_context_chars`；如果完整 System 与原始 Current User 自身超限，仍在 LLM 调用前抛出 `AgentContextLimitError`。
+- Small-budget block identity：Prior / Current-Run block 的 `kind` 由 Harness 内部结构字段维护并贯穿 clipping；Harness 不再从可能被截断的 Header 文本反向推断类型，因此很小的 compaction budget 下两个 layer 也不会因 Header 截断而静默丢失。最终发送给 provider 的 message 仍只包含 `role` / `content`。
+- Stage 12 Compatibility：Workspace Revision、Verification State、Completion Gate、`max_steps` 和错误恢复逻辑未修改。最新 Verification feedback 与 Tool Exchange 可以作为 recent raw ContextUnits 保留，较旧进度可以确定性压缩。
+- P1-2 Compatibility：Read / Shell Tool Result 先经过 P1-2 单次输出预算，再进入 Full History 和 P1-3；recent raw 单元保留原 metadata，只有进入 Digest 后才使用有界 preview。
+- 专项测试命令：`python -m pytest tests/test_context_compaction.py -v --basetemp=.pytest_tmp`；结果：严格 8 项测试全部通过。
+- Fake LLM 验证命令：`python -m scripts.verify_context_compaction`；结果：同一 Agent 完成三次 `run()` 和四次真实 `ReadFileTool` 交换。配置为 `5500 / 2500 / 1400`；最终 Context 为 4573 字符，Prior 与 Current-Run Digest 各 700 字符，最新两组 Tool Exchanges 保持原生且原子。由于当前运行工具进度比 Run 2 更新，`RECENT_MARKER` 按全局连续后缀规则进入 Prior Digest并完整保留；Full History 仍包含全部原始 User、Tool Call 和 Tool Result，synthetic messages 不在 History 中，确定性检查通过，临时 Workspace 已清理。
+- 真实模型验证命令：`python -m scripts.verify_context_compaction_real`；结果：`DeepSeek-V4-Flash` 通过真实 `LLMClient` 完成恰好 3 次调用。Run 1 原始长消息为 5821 字符并在 Run 3 退出 Raw Context；随机 `CONSTRAINT_TOKEN` 保留在 886 字符的 Prior Digest 中，Run 2 的随机 `RECENT_TOKEN` 作为最近 Raw Message 保留，Run 3 Current User 保持原文。最终真实 API Context 为 1977 / 7000 字符，模型精确返回两条完整随机 Marker，Full History 完整且无 synthetic message，临时资源已清理。
+- 正式入口验证：`python -m src.main --help` 已显示唯一新增的 `--compact-context` 开关；随后在隔离临时 Workspace 中运行 `python -m src.main --workspace <temp> --max-context-chars 12000 --compact-context`，真实 Agent 正常启动并返回 `P1-3-CLI-SMOKE-OK`，退出码为 0，临时目录已清理。
+- 兼容回归：Stage 9 / Stage 10 / Stage 12 与正式入口相关的 35 项测试全部通过。
+- 完整回归命令：`python -m pytest -v --basetemp=.pytest_tmp`；结果：102 项测试全部通过（P1-3 开发前基线 94 项，本阶段严格新增 8 项）。
+- 建议截图命名（本次未生成截图）：`p1_3_context_compaction.png`、`p1_3_context_compaction_manual_1.png`、`p1_3_context_compaction_manual_2.png`、`p1_3_context_compaction_real_llm_1.png`、`p1_3_context_compaction_real_llm_2.png`、`p1_3_full_regression.png`。

@@ -2,6 +2,10 @@ import json
 from copy import deepcopy
 from typing import Any
 
+from src.context_compaction import (
+    build_compacted_context,
+    estimate_messages_size,
+)
 from src.parser import ResponseParser
 from src.tools.registry import ToolRegistry
 
@@ -51,6 +55,8 @@ class Agent:
         verbose: bool = False,
         max_steps: int = 20,
         max_context_chars: int | None = None,
+        compaction_trigger_chars: int | None = None,
+        max_compaction_chars: int | None = None,
         verification_tool_name: str | None = None,
     ) -> None:
         if max_steps < 1:
@@ -59,6 +65,39 @@ class Agent:
             raise ValueError(
                 "max_context_chars must be greater than 0 or None."
             )
+        if (compaction_trigger_chars is None) != (
+            max_compaction_chars is None
+        ):
+            raise ValueError(
+                "compaction_trigger_chars and max_compaction_chars must "
+                "both be configured or both be None."
+            )
+        if compaction_trigger_chars is not None:
+            if max_context_chars is None:
+                raise ValueError(
+                    "Context compaction requires max_context_chars."
+                )
+            if (
+                isinstance(compaction_trigger_chars, bool)
+                or not isinstance(compaction_trigger_chars, int)
+                or compaction_trigger_chars < 1
+            ):
+                raise ValueError(
+                    "compaction_trigger_chars must be a positive integer."
+                )
+            if (
+                isinstance(max_compaction_chars, bool)
+                or not isinstance(max_compaction_chars, int)
+                or max_compaction_chars < 1
+            ):
+                raise ValueError(
+                    "max_compaction_chars must be a positive integer."
+                )
+            if compaction_trigger_chars > max_context_chars:
+                raise ValueError(
+                    "compaction_trigger_chars cannot exceed "
+                    "max_context_chars."
+                )
         if (
             verification_tool_name is not None
             and verification_tool_name not in tool_registry.names()
@@ -74,6 +113,8 @@ class Agent:
         self.verbose = verbose
         self.max_steps = max_steps
         self.max_context_chars = max_context_chars
+        self.compaction_trigger_chars = compaction_trigger_chars
+        self.max_compaction_chars = max_compaction_chars
         self.verification_tool_name = verification_tool_name
         self.parser = ResponseParser()
         self._messages = self._create_initial_history()
@@ -114,13 +155,7 @@ class Agent:
         self,
         messages: list[dict[str, Any]],
     ) -> int:
-        serialized = json.dumps(
-            messages,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        return len(serialized)
+        return estimate_messages_size(messages)
 
     def _split_history_into_turns(
         self,
@@ -142,7 +177,7 @@ class Agent:
 
         return system_messages, turns
 
-    def _build_context_messages(self) -> list[dict[str, Any]]:
+    def _build_legacy_context_messages(self) -> list[dict[str, Any]]:
         if self.max_context_chars is None:
             return deepcopy(self._messages)
 
@@ -180,6 +215,56 @@ class Agent:
 
         return deepcopy(context_messages)
 
+    def _build_context_messages(
+        self,
+        current_user_index: int | None = None,
+    ) -> list[dict[str, Any]]:
+        if self.compaction_trigger_chars is None:
+            return self._build_legacy_context_messages()
+
+        if (
+            self._estimate_messages_size(self._messages)
+            < self.compaction_trigger_chars
+        ):
+            return self._build_legacy_context_messages()
+
+        if current_user_index is None:
+            raise ValueError(
+                "current_user_index is required when context compaction "
+                "is active."
+            )
+
+        system_messages = (
+            [self._messages[0]]
+            if self._messages
+            and self._messages[0].get("role") == "system"
+            else []
+        )
+        current_user = self._messages[current_user_index]
+        required_messages = [*system_messages, current_user]
+        required_size = self._estimate_messages_size(required_messages)
+        if required_size > self.max_context_chars:
+            raise AgentContextLimitError(
+                "Required context size "
+                f"{required_size} exceeds max_context_chars "
+                f"{self.max_context_chars}."
+            )
+
+        context_messages = build_compacted_context(
+            self._messages,
+            current_user_index=current_user_index,
+            max_context_chars=self.max_context_chars,
+            max_compaction_chars=self.max_compaction_chars,
+        )
+        context_size = self._estimate_messages_size(context_messages)
+        if context_size > self.max_context_chars:
+            raise AgentContextLimitError(
+                "Compacted context size "
+                f"{context_size} exceeds max_context_chars "
+                f"{self.max_context_chars}."
+            )
+        return context_messages
+
     def _verification_succeeded(self, result: str) -> bool:
         try:
             payload = json.loads(result)
@@ -189,6 +274,7 @@ class Agent:
         return isinstance(payload, dict) and payload.get("ok") is True
 
     def run(self, user_input: str) -> str:
+        current_user_index = len(self._messages)
         self._messages.append(
             {
                 "role": "user",
@@ -199,7 +285,9 @@ class Agent:
         for step in range(1, self.max_steps + 1):
             self._log(f"Step {step}/{self.max_steps}")
             tool_schemas = self.tool_registry.schemas()
-            context_messages = self._build_context_messages()
+            context_messages = self._build_context_messages(
+                current_user_index=current_user_index
+            )
             try:
                 response = self.llm_client.chat(
                     context_messages,
