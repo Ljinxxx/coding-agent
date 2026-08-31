@@ -239,3 +239,23 @@
 - 正式入口：`python -m src.main --help` 通过；保留 `workspace`、Context、Verification 与 `--compact-context` 参数，没有新增 P1-4 CLI flag，也没有将验证专用 Demo Tools 注册到正式 Tool List。
 - 完整回归命令：`python -m pytest -v --basetemp=.pytest_tmp`；结果：110 项测试全部通过（P1-4 开发前真实 baseline 102 项，本阶段严格新增 8 项）。
 - 建议截图命名（本次未生成截图）：`p1_4_tool_execution.png`、`p1_4_tool_execution_manual.png`、`p1_4_tool_execution_real_llm_1.png`、`p1_4_tool_execution_real_llm_2.png`、`p1_4_full_regression.png`。
+
+## Stage 13：End-to-End Coding Task Evaluation
+
+- 目标：冻结现有 Agent 核心能力，在相互隔离的临时 Workspace 中使用真实 Production Agent 完成完整 Coding Task，并由 Host 进行确定性的最终客观评价。
+- Task 1：单文件 Bug Fix；定位并修复 `calculator.add`，同时保持 `subtract` 的正确行为。
+- Task 2：功能实现；根据公开需求实现 `normalize_words`，包括通用空白分隔、小写转换、空输入与标点保留。
+- Task 3：多文件任务；实现 `UserStore.exists` 与 `register_user` 的重复用户、空白名称、名称规范化和存储契约。
+- Workspace：每个任务从运行时生成的全新 `TemporaryDirectory` fixture 开始，使用新的 Agent 与 RecordingLLM，不共享 History 或 Verification State；三个任务结束后临时目录均已自动清理。
+- Production Agent：真实 runner 直接复用 `src.main.build_agent()`，因此使用正式 System Prompt、20 steps、60,000 字符 Context、Read/Shell 输出预算、Unified Tool Execution Boundary，以及 `list_directory`、`read_file`、`edit_file`、`write_file`、`run_command`、`verify_workspace` 六个生产工具。
+- Verification Gate：每个任务都通过非空 Host verification command 启用真实 Stage 12 Completion Gate；Agent 修改 Workspace 后必须调用 `verify_workspace` 并达到 `workspace_revision == verified_revision` 才能 Final。三个真实任务各调用 1 次 `verify_workspace`，最终状态均为 CLEAN。
+- Visible Evaluation：Agent Workspace 内只包含 production source 与 visible pytest tests。Host 在 Agent 前确认三个初始 fixture 均真实失败，并在 Agent Final 后使用 `sys.executable -m pytest -q` 独立复验，结果为 3/3 PASS。
+- Hidden Evaluation：额外行为断言只保存在 Host evaluator 中，在 Agent Final 后通过 Workspace 外的 `python -B -c` 子进程执行；hidden code 不写入 Workspace、不进入 Prompt、Tool Schema、Verification Result 或真实 API request，失败结果也不会回喂模型。真实结果为 3/3 PASS。
+- Test Integrity：Agent 运行前后使用 SHA-256 检查 visible test 文件；修改或删除都会失败。真实运行中 `test_calculator.py`、`test_text_utils.py`、`test_service.py` 均保持不变，结果为 3/3 PASS。
+- Objective PASS：单项必须同时满足初始 visible tests 失败、Agent 正常 Final、Host visible PASS、Host hidden PASS、protected test hash 不变、`verify_workspace >= 1`、Verification State CLEAN 和 Temporary Workspace 已清理；模型最终回答措辞不参与判定。
+- Evaluator Tests：`python -m pytest tests/test_e2e_evaluator.py -v --basetemp=.pytest_tmp`；严格收集 6 项，结果为 `6 passed`。测试证明 visible-only 硬编码会被 Task 1/2 hidden checks 拒绝，Task 3 的四类错误实现会被拒绝，并覆盖 fixture 隔离、文件完整性和结果聚合。
+- 相关回归：`python -m pytest tests/test_agent_verification.py tests/test_tool_execution.py tests/test_context_compaction.py tests/test_tool_output_budget.py -v --basetemp=.pytest_tmp`；Stage 12、P1-4、P1-3 与 P1-2 共 31 项测试全部通过。
+- Real E2E：`python -m scripts.verify_e2e_coding_tasks_real`；`DeepSeek-V4-Flash` 串行完成 3/3。Task 1 为 7 次 LLM / 7 次 Tool，修改 `calculator.py`；Task 2 为 5 / 6，修改 `text_utils.py`；Task 3 为 5 / 7，修改 `service.py` 与 `store.py`。Visible、Hidden、Integrity、Verification Usage 与 Cleanup 均为 3/3 PASS。
+- 正式入口：`python -m src.main --help` 通过，没有新增 Stage 13 CLI 参数。
+- Full Regression：`python -m pytest -v --basetemp=.pytest_tmp`；开发前 baseline 为 110 项，本阶段严格新增 6 项，最终 `116 passed`。
+- 建议截图命名（本次未生成截图）：`stage13_e2e_evaluator.png`、`stage13_e2e_task_1.png`、`stage13_e2e_task_2.png`、`stage13_e2e_task_3.png`、`stage13_e2e_summary.png`、`stage13_full_regression.png`。
