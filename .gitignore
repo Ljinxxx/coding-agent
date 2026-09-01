@@ -12,6 +12,7 @@ __pycache__/
 venv/
 coding-agent.zip
 .pytest_tmp/
+.runs/
 # IDE
 .vscode/
 .idea/

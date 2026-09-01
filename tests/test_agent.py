@@ -8,6 +8,20 @@ from src.tools.base import BaseTool
 from src.tools.registry import ToolRegistry
 
 
+def _without_execution_budget(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    budget_messages = [
+        message
+        for message in messages
+        if str(message.get("content") or "").startswith(
+            "[Execution Budget]\n"
+        )
+    ]
+    assert len(budget_messages) == 1
+    return [message for message in messages if message not in budget_messages]
+
+
 class FakeLLM:
     def __init__(self, responses: list[Any]) -> None:
         self.responses = list(responses)
@@ -150,7 +164,7 @@ def test_agent_preserves_assistant_tool_call_message() -> None:
 
     Agent(llm, registry).run("test")
 
-    messages = llm.calls[1]["messages"]
+    messages = _without_execution_budget(llm.calls[1]["messages"])
     assert [message["role"] for message in messages] == [
         "user",
         "assistant",

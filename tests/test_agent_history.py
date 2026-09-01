@@ -8,6 +8,20 @@ from src.tools.base import BaseTool
 from src.tools.registry import ToolRegistry
 
 
+def _without_execution_budget(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    budget_messages = [
+        message
+        for message in messages
+        if str(message.get("content") or "").startswith(
+            "[Execution Budget]\n"
+        )
+    ]
+    assert len(budget_messages) == 1
+    return [message for message in messages if message not in budget_messages]
+
+
 class FakeLLM:
     def __init__(self, responses: list[Any]) -> None:
         self.responses = list(responses)
@@ -109,7 +123,7 @@ def test_second_run_receives_previous_conversation_history() -> None:
 
     assert first_result == "first-answer"
     assert second_result == "second-answer"
-    assert llm.calls[1]["messages"] == [
+    assert _without_execution_budget(llm.calls[1]["messages"]) == [
         {
             "role": "user",
             "content": "first-message",
@@ -142,7 +156,7 @@ def test_tool_messages_are_preserved_across_runs() -> None:
     assert first_result == "done"
     assert second_result == "continued"
     assert tool.calls == [{"value": "abc"}]
-    assert llm.calls[2]["messages"] == [
+    assert _without_execution_budget(llm.calls[2]["messages"]) == [
         {
             "role": "user",
             "content": "use-tool",
@@ -207,7 +221,7 @@ def test_system_prompt_appears_only_once_across_runs() -> None:
     assert all(
         sum(
             message["role"] == "system"
-            for message in call["messages"]
+            for message in _without_execution_budget(call["messages"])
         )
         == 1
         for call in llm.calls

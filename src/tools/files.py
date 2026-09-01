@@ -300,6 +300,11 @@ class WriteFileTool(BaseTool):
         target = resolve_workspace_path(self.workspace, path)
 
         target.parent.mkdir(parents=True, exist_ok=True)
+        if target.is_file() and target.read_text(encoding="utf-8") == content:
+            return (
+                "No changes made: file already contains identical content: "
+                f"{path}"
+            )
         target.write_text(content, encoding="utf-8")
 
         return f"File written successfully: {path}"

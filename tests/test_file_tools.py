@@ -1,4 +1,5 @@
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -27,24 +28,50 @@ def test_read_file(tmp_path: Path) -> None:
 
 
 def test_write_file(tmp_path: Path) -> None:
+    target = tmp_path / "output.txt"
+    assert not target.exists()
+
     result = WriteFileTool(tmp_path).execute(
         path="output.txt",
         content="stage4 write test",
     )
 
     assert result == "File written successfully: output.txt"
-    assert (tmp_path / "output.txt").read_text(encoding="utf-8") == (
-        "stage4 write test"
-    )
+    assert target.is_file()
+    assert target.read_text(encoding="utf-8") == "stage4 write test"
 
 
 def test_write_file_overwrites_existing_file(tmp_path: Path) -> None:
     target = tmp_path / "output.txt"
     target.write_text("old content", encoding="utf-8")
 
-    WriteFileTool(tmp_path).execute(path="output.txt", content="new content")
+    result = WriteFileTool(tmp_path).execute(
+        path="output.txt",
+        content="new content",
+    )
 
+    assert result == "File written successfully: output.txt"
     assert target.read_text(encoding="utf-8") == "new content"
+
+
+def test_write_file_skips_identical_existing_content(tmp_path: Path) -> None:
+    target = tmp_path / "output.txt"
+    target.write_text("already current", encoding="utf-8")
+
+    with patch.object(
+        Path,
+        "write_text",
+        autospec=True,
+        side_effect=AssertionError("identical content must not be rewritten"),
+    ) as write_text:
+        result = WriteFileTool(tmp_path).execute(
+            path="output.txt",
+            content="already current",
+        )
+
+    write_text.assert_not_called()
+    assert result.startswith("No changes made:")
+    assert target.read_text(encoding="utf-8") == "already current"
 
 
 def test_write_then_read_file(tmp_path: Path) -> None:

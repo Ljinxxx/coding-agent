@@ -7,6 +7,10 @@ from src.context_compaction import (
     estimate_messages_size,
 )
 from src.parser import ResponseParser
+from src.progress_guard import (
+    ProgressGuard,
+    ProgressGuardConfig,
+)
 from src.tool_execution import ToolExecutor
 from src.tools.base import BaseTool
 from src.tools.registry import ToolRegistry
@@ -26,6 +30,24 @@ class AgentResponseError(RuntimeError):
 
 class AgentContextLimitError(RuntimeError):
     pass
+
+
+def _build_execution_budget_message(
+    current_step: int,
+    max_steps: int,
+) -> dict[str, str]:
+    remaining = max_steps - current_step + 1
+    return {
+        "role": "system",
+        "content": (
+            "[Execution Budget]\n"
+            f"Current model step: {current_step} / {max_steps}\n"
+            "Remaining model responses including this one: "
+            f"{remaining}\n"
+            "This is a finite execution budget. Complete the task within "
+            "it; prefer concrete progress over repeated inspection."
+        ),
+    }
 
 
 class Agent:
@@ -168,8 +190,17 @@ class Agent:
 
         return system_messages, turns
 
-    def _build_legacy_context_messages(self) -> list[dict[str, Any]]:
-        if self.max_context_chars is None:
+    def _build_legacy_context_messages(
+        self,
+        *,
+        context_limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        limit = (
+            self.max_context_chars
+            if context_limit is None
+            else context_limit
+        )
+        if limit is None:
             return deepcopy(self._messages)
 
         system_messages, turns = self._split_history_into_turns(
@@ -180,11 +211,11 @@ class Agent:
         context_messages = system_messages + current_turn
         required_size = self._estimate_messages_size(context_messages)
 
-        if required_size > self.max_context_chars:
+        if required_size > limit:
             raise AgentContextLimitError(
                 "Required context size "
                 f"{required_size} exceeds max_context_chars "
-                f"{self.max_context_chars}."
+                f"{limit}."
             )
 
         for turn in reversed(turns[:-1]):
@@ -197,7 +228,7 @@ class Agent:
 
             if (
                 self._estimate_messages_size(candidate_messages)
-                > self.max_context_chars
+                > limit
             ):
                 break
 
@@ -209,15 +240,27 @@ class Agent:
     def _build_context_messages(
         self,
         current_user_index: int | None = None,
+        *,
+        context_limit: int | None = None,
     ) -> list[dict[str, Any]]:
+        limit = (
+            self.max_context_chars
+            if context_limit is None
+            else context_limit
+        )
         if self.compaction_trigger_chars is None:
-            return self._build_legacy_context_messages()
+            return self._build_legacy_context_messages(
+                context_limit=limit
+            )
 
+        history_size = self._estimate_messages_size(self._messages)
         if (
-            self._estimate_messages_size(self._messages)
-            < self.compaction_trigger_chars
+            history_size < self.compaction_trigger_chars
+            and (limit is None or history_size <= limit)
         ):
-            return self._build_legacy_context_messages()
+            return self._build_legacy_context_messages(
+                context_limit=limit
+            )
 
         if current_user_index is None:
             raise ValueError(
@@ -234,24 +277,81 @@ class Agent:
         current_user = self._messages[current_user_index]
         required_messages = [*system_messages, current_user]
         required_size = self._estimate_messages_size(required_messages)
-        if required_size > self.max_context_chars:
+        if required_size > limit:
             raise AgentContextLimitError(
                 "Required context size "
                 f"{required_size} exceeds max_context_chars "
-                f"{self.max_context_chars}."
+                f"{limit}."
             )
 
         context_messages = build_compacted_context(
             self._messages,
             current_user_index=current_user_index,
-            max_context_chars=self.max_context_chars,
+            max_context_chars=limit,
             max_compaction_chars=self.max_compaction_chars,
         )
         context_size = self._estimate_messages_size(context_messages)
-        if context_size > self.max_context_chars:
+        if context_size > limit:
             raise AgentContextLimitError(
                 "Compacted context size "
                 f"{context_size} exceeds max_context_chars "
+                f"{limit}."
+            )
+        return context_messages
+
+    def _build_llm_request_messages(
+        self,
+        *,
+        current_user_index: int,
+        current_step: int,
+        run_max_steps: int,
+    ) -> list[dict[str, Any]]:
+        budget_message = _build_execution_budget_message(
+            current_step,
+            run_max_steps,
+        )
+        context_limit = self.max_context_chars
+        if context_limit is not None:
+            required_messages = [
+                budget_message,
+                self._messages[current_user_index],
+            ]
+            if (
+                self._messages
+                and self._messages[0].get("role") == "system"
+            ):
+                required_messages.insert(0, self._messages[0])
+            required_size = self._estimate_messages_size(required_messages)
+            if required_size > context_limit:
+                raise AgentContextLimitError(
+                    "Required request context size "
+                    f"{required_size} exceeds max_context_chars "
+                    f"{context_limit}."
+                )
+            context_limit -= self._estimate_messages_size(
+                [budget_message]
+            ) - 1
+
+        context_messages = self._build_context_messages(
+            current_user_index=current_user_index,
+            context_limit=context_limit,
+        )
+        insertion_index = int(
+            bool(
+                context_messages
+                and context_messages[0].get("role") == "system"
+            )
+        )
+        context_messages.insert(insertion_index, budget_message)
+
+        request_size = self._estimate_messages_size(context_messages)
+        if (
+            self.max_context_chars is not None
+            and request_size > self.max_context_chars
+        ):
+            raise AgentContextLimitError(
+                "LLM request context size "
+                f"{request_size} exceeds max_context_chars "
                 f"{self.max_context_chars}."
             )
         return context_messages
@@ -268,7 +368,26 @@ class Agent:
         if tool.mutates_workspace:
             self._workspace_revision += 1
 
-    def run(self, user_input: str) -> str:
+    def _create_progress_guard(
+        self,
+        config: ProgressGuardConfig | None,
+    ) -> ProgressGuard | None:
+        if config is None:
+            return None
+        if not isinstance(config, ProgressGuardConfig):
+            raise TypeError(
+                "progress_guard must be a ProgressGuardConfig or None."
+            )
+        return ProgressGuard(config)
+
+    def run(
+        self,
+        user_input: str,
+        *,
+        require_verified_completion: bool = True,
+        progress_guard: ProgressGuardConfig | None = None,
+    ) -> str:
+        active_progress_guard = self._create_progress_guard(progress_guard)
         current_user_index = len(self._messages)
         self._messages.append(
             {
@@ -277,11 +396,14 @@ class Agent:
             }
         )
 
-        for step in range(1, self.max_steps + 1):
-            self._log(f"Step {step}/{self.max_steps}")
+        run_max_steps = self.max_steps
+        for step in range(1, run_max_steps + 1):
+            self._log(f"Step {step}/{run_max_steps}")
             tool_schemas = self.tool_registry.schemas()
-            context_messages = self._build_context_messages(
-                current_user_index=current_user_index
+            context_messages = self._build_llm_request_messages(
+                current_user_index=current_user_index,
+                current_step=step,
+                run_max_steps=run_max_steps,
             )
             try:
                 response = self.llm_client.chat(
@@ -298,6 +420,9 @@ class Agent:
                     f"Failed to parse model response: {error}"
                 ) from error
 
+            if active_progress_guard is not None:
+                active_progress_guard.begin_response()
+
             if not parsed.has_tool_calls:
                 self._messages.append(
                     {
@@ -305,8 +430,11 @@ class Agent:
                         "content": parsed.content,
                     }
                 )
+                if active_progress_guard is not None:
+                    active_progress_guard.finish_response()
                 if (
-                    self.verification_tool_name is not None
+                    require_verified_completion
+                    and self.verification_tool_name is not None
                     and self.verification_required
                 ):
                     feedback = self._VERIFICATION_REQUIRED_FEEDBACK.format(
@@ -319,7 +447,7 @@ class Agent:
                         }
                     )
                     self._log("Completion Gate：需要成功验证后才能结束")
-                    if step < self.max_steps:
+                    if step < run_max_steps:
                         self._log("再次调用模型")
                     continue
 
@@ -353,11 +481,24 @@ class Agent:
                     + json.dumps(tool_call.arguments, ensure_ascii=False)
                 )
 
-                execution_result = self.tool_executor.execute(
-                    tool_call.name,
-                    tool_call.arguments,
-                    before_execute=self._before_tool_execution,
-                )
+                workspace_revision_before = self._workspace_revision
+                if (
+                    active_progress_guard is not None
+                    and tool_call.name in self.tool_registry.names()
+                    and not active_progress_guard.allows(
+                        tool_call.name,
+                        tool_call.arguments,
+                    )
+                ):
+                    execution_result = active_progress_guard.blocked_result(
+                        tool_call.name
+                    )
+                else:
+                    execution_result = self.tool_executor.execute(
+                        tool_call.name,
+                        tool_call.arguments,
+                        before_execute=self._before_tool_execution,
+                    )
                 if not execution_result.execution_ok:
                     self._log(f"工具执行失败：{tool_call.name}")
                 result = execution_result.content
@@ -369,6 +510,15 @@ class Agent:
                 ):
                     self._verified_revision = self._workspace_revision
 
+                if active_progress_guard is not None:
+                    active_progress_guard.observe_result(
+                        tool_call.name,
+                        tool_call.arguments,
+                        execution_result,
+                        workspace_revision_before,
+                        self._workspace_revision,
+                    )
+
                 self._log(f"工具结果：{result}")
                 self._messages.append(
                     {
@@ -378,11 +528,14 @@ class Agent:
                     }
                 )
 
-            if step < self.max_steps:
+            if active_progress_guard is not None:
+                active_progress_guard.finish_response()
+
+            if step < run_max_steps:
                 self._log("再次调用模型")
 
         raise AgentMaxStepsError(
-            f"Agent reached maximum step limit: {self.max_steps}"
+            f"Agent reached maximum step limit: {run_max_steps}"
         )
 
     def _log(self, message: str) -> None:

@@ -40,6 +40,7 @@ VERIFICATION_PROMPT = (
     "workspace, run verify_workspace successfully before returning the final "
     "answer; do not attempt to replace the configured checks."
 )
+DEFAULT_MAX_STEPS = 20
 DEFAULT_MAX_CONTEXT_CHARS = 60_000
 COMPACTION_TRIGGER_NUMERATOR = 3
 COMPACTION_RATIO_DENOMINATOR = 4
@@ -59,6 +60,7 @@ def build_agent(
     workspace: Path,
     llm_client: Any | None = None,
     *,
+    max_steps: int = DEFAULT_MAX_STEPS,
     max_context_chars: int = DEFAULT_MAX_CONTEXT_CHARS,
     compact_context: bool = False,
     verification_commands: Sequence[str] | None = None,
@@ -112,7 +114,7 @@ def build_agent(
         registry,
         system_prompt=system_prompt,
         verbose=True,
-        max_steps=20,
+        max_steps=max_steps,
         max_context_chars=max_context_chars,
         compaction_trigger_chars=compaction_trigger_chars,
         max_compaction_chars=max_compaction_chars,

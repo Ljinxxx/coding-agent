@@ -229,7 +229,9 @@ TASK_3 = CodingTask(
 
 TASKS = (TASK_1, TASK_2, TASK_3)
 
-_IGNORED_DIRECTORY_NAMES = frozenset({"__pycache__", ".pytest_cache"})
+_IGNORED_DIRECTORY_NAMES = frozenset(
+    {"__pycache__", ".pytest_cache", ".pytest_tmp"}
+)
 
 
 def materialize_task(task: CodingTask, workspace: Path) -> None:

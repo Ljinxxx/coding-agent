@@ -5,7 +5,11 @@ from typing import Any
 
 import pytest
 
-from src.agent import Agent, AgentContextLimitError
+from src.agent import (
+    Agent,
+    AgentContextLimitError,
+    _build_execution_budget_message,
+)
 from src.tools.base import BaseTool
 from src.tools.registry import ToolRegistry
 
@@ -79,6 +83,29 @@ def _context_size(messages: list[dict[str, Any]]) -> int:
     )
 
 
+def _execution_budget_chars(
+    *,
+    current_step: int = 1,
+    max_steps: int = 20,
+) -> int:
+    message = _build_execution_budget_message(current_step, max_steps)
+    return _context_size([message]) - 1
+
+
+def _without_execution_budget(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    budget_messages = [
+        message
+        for message in messages
+        if str(message.get("content") or "").startswith(
+            "[Execution Budget]\n"
+        )
+    ]
+    assert len(budget_messages) == 1
+    return [message for message in messages if message not in budget_messages]
+
+
 def test_context_limit_disabled_sends_full_history() -> None:
     llm = FakeLLM(
         [
@@ -97,12 +124,15 @@ def test_context_limit_disabled_sends_full_history() -> None:
     history_before_second_run = agent.history
     agent.run("second-question")
 
-    assert llm.calls[1]["messages"] == history_before_second_run + [
-        {
-            "role": "user",
-            "content": "second-question",
-        }
-    ]
+    assert _without_execution_budget(llm.calls[1]["messages"]) == (
+        history_before_second_run
+        + [
+            {
+                "role": "user",
+                "content": "second-question",
+            }
+        ]
+    )
 
 
 def test_context_trims_oldest_turns_and_keeps_recent_contiguous_window(
@@ -140,15 +170,19 @@ def test_context_trims_oldest_turns_and_keeps_recent_contiguous_window(
     context_if_middle_were_skipped = (
         system_messages + oldest_turn + recent_turn + [current_user]
     )
-    budget = _context_size(context_if_middle_were_skipped)
+    budget = _context_size(
+        context_if_middle_were_skipped
+    ) + _execution_budget_chars()
 
-    assert _context_size(expected_context) <= budget
-    assert _context_size(context_if_middle_were_added) > budget
+    budget_chars = _execution_budget_chars()
+    assert _context_size(expected_context) + budget_chars <= budget
+    assert _context_size(context_if_middle_were_added) + budget_chars > budget
     agent.max_context_chars = budget
 
     agent.run("current-question")
 
-    actual_context = llm.calls[-1]["messages"]
+    request_context = llm.calls[-1]["messages"]
+    actual_context = _without_execution_budget(request_context)
     assert actual_context == expected_context
     assert actual_context[0]["role"] == "system"
     assert sum(
@@ -156,11 +190,11 @@ def test_context_trims_oldest_turns_and_keeps_recent_contiguous_window(
     ) == 1
     assert not any(
         "oldest-small" in str(message.get("content"))
-        for message in llm.calls[-1]["messages"]
+        for message in request_context
     )
     assert not any(
         "middle-blocker" in str(message.get("content"))
-        for message in llm.calls[-1]["messages"]
+        for message in request_context
     )
 
 
@@ -184,14 +218,16 @@ def test_context_trimming_does_not_modify_full_history() -> None:
     }
     expected_context = recent_turn + [current_user]
     full_context = history_before_current_run + [current_user]
-    budget = _context_size(expected_context)
+    budget = _context_size(expected_context) + _execution_budget_chars()
 
-    assert _context_size(full_context) > budget
+    assert _context_size(full_context) + _execution_budget_chars() > budget
     agent.max_context_chars = budget
 
     agent.run("current-question")
 
-    assert llm.calls[-1]["messages"] == expected_context
+    assert _without_execution_budget(llm.calls[-1]["messages"]) == (
+        expected_context
+    )
     assert agent.history == history_before_current_run + [
         current_user,
         {
@@ -236,14 +272,16 @@ def test_context_trimming_preserves_complete_tool_turn() -> None:
     }
     expected_context = system_messages + tool_turn + [current_user]
     full_context = history + [current_user]
-    budget = _context_size(expected_context)
+    budget = _context_size(expected_context) + _execution_budget_chars()
 
-    assert _context_size(full_context) > budget
+    assert _context_size(full_context) + _execution_budget_chars() > budget
     agent.max_context_chars = budget
 
     agent.run("current-question")
 
-    actual_context = llm.calls[-1]["messages"]
+    actual_context = _without_execution_budget(
+        llm.calls[-1]["messages"]
+    )
     assert actual_context == expected_context
     assert [message["role"] for message in actual_context] == [
         "system",
@@ -289,14 +327,16 @@ def test_context_trimming_always_keeps_system_prompt() -> None:
         current_user,
     ]
     full_context = agent.history + [current_user]
-    budget = _context_size(expected_context)
+    budget = _context_size(expected_context) + _execution_budget_chars()
 
-    assert _context_size(full_context) > budget
+    assert _context_size(full_context) + _execution_budget_chars() > budget
     agent.max_context_chars = budget
 
     agent.run("current-question")
 
-    actual_context = llm.calls[-1]["messages"]
+    actual_context = _without_execution_budget(
+        llm.calls[-1]["messages"]
+    )
     assert actual_context == expected_context
     assert actual_context[0]["role"] == "system"
     assert sum(
@@ -315,7 +355,11 @@ def test_current_turn_over_budget_raises_before_llm_call() -> None:
             "content": "current-question",
         },
     ]
-    budget = _context_size(mandatory_context) - 1
+    budget = (
+        _context_size(mandatory_context)
+        + _execution_budget_chars()
+        - 1
+    )
     llm = FakeLLM([_text_response("must-not-be-used")])
     agent = Agent(
         llm,

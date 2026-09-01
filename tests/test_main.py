@@ -99,6 +99,23 @@ def reject_real_client() -> None:
     raise AssertionError("The integration test must not create a real LLM client.")
 
 
+def test_build_agent_preserves_default_and_accepts_max_steps_override(
+    tmp_path: Path,
+) -> None:
+    default_agent = main_module.build_agent(
+        tmp_path,
+        llm_client=FakeLLM([]),
+    )
+    challenge_agent = main_module.build_agent(
+        tmp_path,
+        llm_client=FakeLLM([]),
+        max_steps=40,
+    )
+
+    assert default_agent.max_steps == main_module.DEFAULT_MAX_STEPS == 20
+    assert challenge_agent.max_steps == 40
+
+
 def test_main_runs_read_only_agent_with_default_context_and_no_verification(
     tmp_path: Path,
     monkeypatch: Any,

@@ -347,6 +347,88 @@ def test_final_is_blocked_after_workspace_mutation_until_verification(
     assert refusing_agent.verification_required is True
 
 
+@pytest.mark.parametrize(
+    "explicitly_require_verification",
+    [False, True],
+    ids=["default", "explicit-true"],
+)
+def test_later_run_verifies_state_left_dirty_by_intermediate_run(
+    tmp_path: Path,
+    explicitly_require_verification: bool,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    verifier = VerifyWorkspaceTool(
+        workspace,
+        [make_command(sys.executable, "-c", 'print("verified")')],
+    )
+    registry = registry_with(WriteFileTool(workspace), verifier)
+    llm = FakeLLM(
+        [
+            tool_response(
+                (
+                    "draft-write",
+                    "write_file",
+                    {"path": "draft.txt", "content": "draft"},
+                )
+            ),
+            text_response("intermediate-complete"),
+            text_response("premature-release-final"),
+            tool_response(("release-verify", "verify_workspace", {})),
+            text_response("verified-release-final"),
+        ]
+    )
+    agent = Agent(
+        llm,
+        registry,
+        max_steps=3,
+        verification_tool_name="verify_workspace",
+    )
+    llm.agent = agent
+
+    with pytest.raises(TypeError, match="positional"):
+        agent.run("Positional policy is not supported.", False)  # type: ignore[misc]
+
+    assert (
+        agent.run(
+            "Prepare an intermediate draft.",
+            require_verified_completion=False,
+        )
+        == "intermediate-complete"
+    )
+    assert agent.workspace_revision == 1
+    assert agent.verified_revision == 0
+    assert agent.verification_required is True
+    assert not any(
+        str(message.get("content") or "").startswith(
+            "[Verification Required]"
+        )
+        for message in agent.history
+    )
+
+    if explicitly_require_verification:
+        result = agent.run(
+            "Finish the release.",
+            require_verified_completion=True,
+        )
+    else:
+        result = agent.run("Finish the release.")
+
+    assert result == "verified-release-final"
+    assert llm.states == [(0, 0), (1, 0), (1, 0), (1, 0), (1, 1)]
+    assert llm.calls[3]["messages"][-1]["role"] == "user"
+    assert "[Verification Required]" in llm.calls[3]["messages"][-1][
+        "content"
+    ]
+    assert result_for_call(agent.history, "release-verify")["ok"] is True
+    assert agent.workspace_revision == agent.verified_revision == 1
+    assert agent.verification_required is False
+    assert agent.history[-1] == {
+        "role": "assistant",
+        "content": "verified-release-final",
+    }
+
+
 def test_failed_verification_keeps_workspace_dirty_and_agent_continues(
     tmp_path: Path,
 ) -> None:

@@ -10,7 +10,11 @@ from typing import Any
 
 import pytest
 
-from src.agent import Agent, AgentContextLimitError
+from src.agent import (
+    Agent,
+    AgentContextLimitError,
+    _build_execution_budget_message,
+)
 from src.context_compaction import (
     CURRENT_RUN_HEADER,
     _build_compaction_messages,
@@ -32,6 +36,29 @@ def _context_size(messages: list[dict[str, Any]]) -> int:
             separators=(",", ":"),
         )
     )
+
+
+def _execution_budget_chars(
+    *,
+    current_step: int = 1,
+    max_steps: int = 20,
+) -> int:
+    message = _build_execution_budget_message(current_step, max_steps)
+    return _context_size([message]) - 1
+
+
+def _without_execution_budget(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    budget_messages = [
+        message
+        for message in messages
+        if str(message.get("content") or "").startswith(
+            "[Execution Budget]\n"
+        )
+    ]
+    assert len(budget_messages) == 1
+    return [message for message in messages if message not in budget_messages]
 
 
 def _text_response(content: str) -> SimpleNamespace:
@@ -198,11 +225,15 @@ def test_compaction_disabled_or_below_trigger_preserves_legacy_context(
         *history[-2:],
         {"role": "user", "content": "current-question"},
     ]
-    legacy_agent.max_context_chars = _context_size(expected_context)
+    legacy_agent.max_context_chars = (
+        _context_size(expected_context) + _execution_budget_chars()
+    )
 
     legacy_agent.run("current-question")
 
-    assert legacy_llm.calls[-1]["messages"] == expected_context
+    assert _without_execution_budget(
+        legacy_llm.calls[-1]["messages"]
+    ) == expected_context
     assert _compaction_messages(legacy_llm.calls[-1]["messages"]) == []
 
     below_llm = FakeLLM([_text_response("short-answer")])
@@ -215,7 +246,7 @@ def test_compaction_disabled_or_below_trigger_preserves_legacy_context(
         max_compaction_chars=1_000,
     )
     below_agent.run("short-question")
-    assert below_llm.calls[0]["messages"] == [
+    assert _without_execution_budget(below_llm.calls[0]["messages"]) == [
         {"role": "system", "content": "system"},
         {"role": "user", "content": "short-question"},
     ]
@@ -275,7 +306,7 @@ def test_old_context_is_compacted_after_trigger() -> None:
         llm,
         ToolRegistry(),
         system_prompt="system",
-        max_context_chars=1_800,
+        max_context_chars=1_800 + _execution_budget_chars(),
         compaction_trigger_chars=700,
         max_compaction_chars=600,
     )
@@ -314,7 +345,7 @@ def test_current_user_request_is_never_compacted() -> None:
         llm,
         ToolRegistry(),
         system_prompt="system",
-        max_context_chars=2_000,
+        max_context_chars=2_000 + _execution_budget_chars(),
         compaction_trigger_chars=500,
         max_compaction_chars=500,
     )
@@ -330,7 +361,7 @@ def test_current_user_request_is_never_compacted() -> None:
         {"role": "system", "content": "required-system"},
         current_message,
     ]
-    budget = _context_size(mandatory) - 1
+    budget = _context_size(mandatory) + _execution_budget_chars() - 1
     overflow_llm = FakeLLM([_text_response("must-not-run")])
     overflow_agent = Agent(
         overflow_llm,
@@ -369,7 +400,10 @@ def test_current_run_old_progress_compacts_but_recent_units_stay_raw(
         registry,
         system_prompt="system",
         max_steps=5,
-        max_context_chars=2_200,
+        max_context_chars=(
+            2_200
+            + _execution_budget_chars(current_step=5, max_steps=5)
+        ),
         compaction_trigger_chars=500,
         max_compaction_chars=600,
     )
@@ -447,7 +481,10 @@ def test_tool_call_and_results_are_never_split() -> None:
         llm,
         _registry_with(EchoTool(), FailingTool()),
         max_steps=3,
-        max_context_chars=1_600,
+        max_context_chars=(
+            1_600
+            + _execution_budget_chars(current_step=3, max_steps=3)
+        ),
         compaction_trigger_chars=400,
         max_compaction_chars=600,
     )
@@ -590,7 +627,7 @@ def test_compaction_never_mutates_full_history_and_reset_still_works(
         llm,
         ToolRegistry(),
         system_prompt="system",
-        max_context_chars=1_600,
+        max_context_chars=1_600 + _execution_budget_chars(),
         compaction_trigger_chars=400,
         max_compaction_chars=500,
     )
@@ -649,7 +686,10 @@ def test_compaction_preserves_verification_gate_semantics(
         llm,
         registry,
         max_steps=4,
-        max_context_chars=2_000,
+        max_context_chars=(
+            2_000
+            + _execution_budget_chars(current_step=4, max_steps=4)
+        ),
         compaction_trigger_chars=400,
         max_compaction_chars=600,
         verification_tool_name="verify_workspace",
