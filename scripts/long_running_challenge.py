@@ -333,7 +333,10 @@ The supported severity names are LOW, MEDIUM, HIGH, and CRITICAL. Tests are
 authoritative for public API behavior. The `--min-severity` option accepts
 these names case-insensitively. Unsupported values must be rejected at the CLI
 argument boundary as a CLI usage error with exit status 2, before incident
-processing begins.
+processing begins. A programmatic `main(...)` call must raise `SystemExit(2)`
+for an unsupported severity, not return 2, and validation must happen before
+opening the input file. The `python -m incident.cli` module entrypoint must
+invoke the same public CLI behavior.
 
 When `--report` is used, the CLI must emit the same complete v2 report schema
 defined by `incident.report.build_report`. The schema has exactly these
@@ -673,6 +676,10 @@ def test_build_report_serializes_actionable_incidents_in_given_order():
     ]
 ''',
         "tests/test_cli.py": '''import json
+import subprocess
+import sys
+
+import pytest
 
 from incident.cli import main
 
@@ -687,25 +694,8 @@ def _input_file(tmp_path):
     return path
 
 
-def test_cli_outputs_default_json_list(tmp_path, capsys):
-    input_path = _input_file(tmp_path)
-    assert main([str(input_path)]) == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert [item["id"] for item in payload] == ["high"]
-
-
-def test_cli_accepts_lowercase_minimum_severity(tmp_path, capsys):
-    input_path = _input_file(tmp_path)
-    assert main([str(input_path), "--min-severity", "high"]) == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload[0]["severity"] == "HIGH"
-
-
-def test_cli_report_flag_outputs_v2_report(tmp_path, capsys):
-    input_path = _input_file(tmp_path)
-    assert main([str(input_path), "--report"]) == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload == {
+def _expected_report_payload():
+    return {
         "schema_version": 2,
         "total_received": 2,
         "total_actionable": 1,
@@ -724,6 +714,63 @@ def test_cli_report_flag_outputs_v2_report(tmp_path, capsys):
             }
         ],
     }
+
+
+def test_cli_outputs_default_json_list(tmp_path, capsys):
+    input_path = _input_file(tmp_path)
+    assert main([str(input_path)]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert [item["id"] for item in payload] == ["high"]
+
+
+def test_cli_accepts_lowercase_minimum_severity(tmp_path, capsys):
+    input_path = _input_file(tmp_path)
+    assert main([str(input_path), "--min-severity", "high"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload[0]["severity"] == "HIGH"
+
+
+def test_cli_rejects_unsupported_severity_with_usage_error(tmp_path):
+    input_path = _input_file(tmp_path)
+    with pytest.raises(SystemExit) as error:
+        main([str(input_path), "--min-severity", "urgent"])
+    assert error.value.code == 2
+
+
+def test_cli_rejects_unsupported_severity_before_opening_input(monkeypatch):
+    def forbidden_open(*args, **kwargs):
+        raise AssertionError("input must not be opened before argument validation")
+
+    monkeypatch.setattr("builtins.open", forbidden_open)
+    with pytest.raises(SystemExit) as error:
+        main(["public-do-not-open.txt", "--min-severity", "urgent"])
+    assert error.value.code == 2
+
+
+def test_cli_report_flag_outputs_v2_report(tmp_path, capsys):
+    input_path = _input_file(tmp_path)
+    assert main([str(input_path), "--report"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == _expected_report_payload()
+
+
+def test_cli_module_report_outputs_complete_v2_payload(tmp_path):
+    input_path = _input_file(tmp_path)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-B",
+            "-m", "incident.cli",
+            str(input_path),
+            "--report",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        shell=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert json.loads(completed.stdout) == _expected_report_payload()
 ''',
     }
 

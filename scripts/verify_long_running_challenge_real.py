@@ -10,7 +10,7 @@ import sys
 import time
 from collections import Counter
 from copy import deepcopy
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -77,6 +77,7 @@ from src.tools.shell import DEFAULT_SHELL_MAX_OUTPUT_CHARS, RunCommandTool
 CHALLENGE_NAME = "Long-Horizon Repository Repair"
 SCENARIO_NAME = "Incident Triage Service v2 Release Recovery"
 CHALLENGE_MAX_STEPS = 40
+RUN4_INITIAL_DIAGNOSIS_RESPONSES = 3
 PREFERRED_RUN4_FIRST_MUTATION_STEP_MAX = 4
 PREFERRED_RUN4_DUPLICATE_COMPLETE_READS = 0
 PREFERRED_RUN4_PYTEST_RERUNS_WITHOUT_INTERVENING_MUTATION = 0
@@ -156,6 +157,36 @@ class RunSpec:
     prompt: str
     require_verified_completion: bool
     progress_guard: ProgressGuardConfig | None = None
+
+
+@dataclass(frozen=True)
+class PendingTrackedFailure:
+    command: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.command, str) or not self.command.strip():
+            raise ValueError("command must be a non-empty string.")
+        object.__setattr__(self, "command", self.command.strip())
+
+
+def seed_run_progress_guard(
+    spec: RunSpec,
+    failure: PendingTrackedFailure,
+    *,
+    initial_diagnosis_responses: int,
+) -> RunSpec:
+    if spec.progress_guard is None:
+        raise ValueError("RunSpec must have a Progress Guard before seeding.")
+    if not isinstance(failure, PendingTrackedFailure):
+        raise TypeError("failure must be a PendingTrackedFailure.")
+    return replace(
+        spec,
+        progress_guard=replace(
+            spec.progress_guard,
+            initial_pending_command=failure.command,
+            initial_diagnosis_responses=initial_diagnosis_responses,
+        ),
+    )
 
 
 @dataclass
@@ -248,6 +279,7 @@ def evaluate_completion_dimensions(
     error: str | None,
     first_mutation_step: int | None,
     duplicate_complete_reads_before_first_mutation: int,
+    pytest_calls: int = 0,
     pytest_reruns_without_intervening_mutation: int = 0,
     pending_failed_test_at_run_end: bool = False,
 ) -> dict[str, Any]:
@@ -276,8 +308,11 @@ def evaluate_completion_dimensions(
         pytest_reruns_without_intervening_mutation
         == PREFERRED_RUN4_PYTEST_RERUNS_WITHOUT_INTERVENING_MUTATION
     )
+    pytest_executed = pytest_calls >= 1
     pytest_repair_cycle_target_met = (
-        pytest_rerun_target_met and not pending_failed_test_at_run_end
+        pytest_executed
+        and pytest_rerun_target_met
+        and not pending_failed_test_at_run_end
     )
     action_warnings: list[str] = []
     if not mutation_deadline_met:
@@ -303,6 +338,10 @@ def evaluate_completion_dimensions(
             "failed pytest reruns without an intervening production mutation="
             f"{pytest_reruns_without_intervening_mutation}; preferred "
             f"{PREFERRED_RUN4_PYTEST_RERUNS_WITHOUT_INTERVENING_MUTATION}"
+        )
+    if not pytest_executed:
+        action_warnings.append(
+            "Run 4 did not execute the tracked pytest command"
         )
     if pending_failed_test_at_run_end:
         action_warnings.append(
@@ -1010,12 +1049,15 @@ def _is_successful_progress_mutation(exchange: ToolExchange) -> bool:
     )
 
 
-def _tracked_pytest_result(exchange: ToolExchange) -> bool | None:
+def _tracked_command_result(
+    exchange: ToolExchange,
+    tracked_commands: tuple[str, ...],
+) -> bool | None:
+    command = exchange.arguments.get("command")
     if (
         exchange.name != "run_command"
-        or not _is_challenge_pytest_command(
-            exchange.arguments.get("command")
-        )
+        or not isinstance(command, str)
+        or command.strip() not in tracked_commands
         or len(exchange.results) != 1
     ):
         return None
@@ -1028,8 +1070,54 @@ def _tracked_pytest_result(exchange: ToolExchange) -> bool | None:
     return exit_code == 0
 
 
+def _tracked_pytest_result(exchange: ToolExchange) -> bool | None:
+    return _tracked_command_result(exchange, (CHALLENGE_PYTEST_COMMAND,))
+
+
+def derive_pending_tracked_failure(
+    history: list[dict[str, Any]],
+    records: list[RunRecord],
+    *,
+    run_index: int,
+    tracked_commands: tuple[str, ...],
+) -> PendingTrackedFailure | None:
+    pending_command: str | None = None
+    mutation_after_failure = False
+    for exchange in sorted(
+        collect_tool_exchanges(history, records),
+        key=lambda item: item.sequence_index,
+    ):
+        if exchange.run_index != run_index:
+            continue
+
+        tracked_result = _tracked_command_result(exchange, tracked_commands)
+        if tracked_result is False:
+            pending_command = str(exchange.arguments["command"]).strip()
+            mutation_after_failure = False
+            continue
+        if (
+            tracked_result is True
+            and pending_command is not None
+            and str(exchange.arguments["command"]).strip() == pending_command
+            and mutation_after_failure
+        ):
+            pending_command = None
+            mutation_after_failure = False
+            continue
+        if pending_command is not None and _is_successful_progress_mutation(
+            exchange
+        ):
+            mutation_after_failure = True
+
+    if pending_command is None:
+        return None
+    return PendingTrackedFailure(pending_command)
+
+
 def _run4_progress_metrics(
     exchanges: list[ToolExchange],
+    *,
+    initial_pending_command: str | None = None,
 ) -> dict[str, int | bool]:
     run4_exchanges = sorted(
         (
@@ -1043,11 +1131,13 @@ def _run4_progress_metrics(
     for exchange in run4_exchanges:
         by_response.setdefault(exchange.message_index, []).append(exchange)
 
-    pending_failed_test = False
-    awaiting_mutation = False
+    pending_failed_test = initial_pending_command is not None
+    awaiting_mutation = pending_failed_test
     read_only_responses = 0
     interventions = 0
+    pretest_interventions = 0
     successful_mutations = 0
+    completed_pytest_seen = False
 
     for response_exchanges in by_response.values():
         awaiting_at_response_start = (
@@ -1063,6 +1153,8 @@ def _run4_progress_metrics(
             )
             if blocked:
                 interventions += 1
+                if not completed_pytest_seen:
+                    pretest_interventions += 1
             if exchange.name not in {"read_file", "list_directory"} and not blocked:
                 response_was_read_only = False
 
@@ -1075,6 +1167,8 @@ def _run4_progress_metrics(
                 awaiting_mutation = False
 
             tracked_result = _tracked_pytest_result(exchange)
+            if tracked_result is not None:
+                completed_pytest_seen = True
             if tracked_result is True:
                 pending_failed_test = False
                 awaiting_mutation = False
@@ -1092,6 +1186,7 @@ def _run4_progress_metrics(
     return {
         "run4_read_only_responses_after_failed_test": read_only_responses,
         "run4_progress_guard_interventions": interventions,
+        "run4_pretest_guard_interventions": pretest_interventions,
         "run4_successful_mutations_after_failed_test": successful_mutations,
         "run4_pending_failed_test_at_run_end": pending_failed_test,
     }
@@ -1100,8 +1195,12 @@ def _run4_progress_metrics(
 def _count_run4_pytest_reruns_without_intervening_mutation(
     exchanges: list[ToolExchange],
     workspace: Path | None,
+    *,
+    initial_pending_command: str | None = None,
 ) -> int:
-    pending_failed_message_index: int | None = None
+    pending_failed_message_index: int | None = (
+        -1 if initial_pending_command is not None else None
+    )
     reruns_without_mutation = 0
 
     for exchange in sorted(
@@ -1194,6 +1293,7 @@ def _run4_action_metrics(
     records: list[RunRecord],
     exchanges: list[ToolExchange],
     workspace: Path | None,
+    run_specs: tuple[RunSpec, ...],
 ) -> dict[str, int | bool | None]:
     run4_exchanges = [
         exchange for exchange in exchanges if exchange.run_index == 4
@@ -1210,6 +1310,24 @@ def _run4_action_metrics(
             start=1,
         )
     }
+    run4_guard = next(
+        (
+            spec.progress_guard
+            for spec in run_specs
+            if spec.index == 4
+        ),
+        None,
+    )
+    initial_pending_command = (
+        run4_guard.initial_pending_command
+        if run4_guard is not None
+        else None
+    )
+    initial_diagnosis_responses = (
+        run4_guard.initial_diagnosis_responses
+        if initial_pending_command is not None
+        else 0
+    )
     mutations = [
         exchange
         for exchange in run4_exchanges
@@ -1222,6 +1340,24 @@ def _run4_action_metrics(
     )
     mutation_sequence = (
         first_mutation.sequence_index if first_mutation is not None else None
+    )
+    first_successful_mutation = min(
+        (
+            exchange
+            for exchange in run4_exchanges
+            if _is_successful_progress_mutation(exchange)
+        ),
+        key=lambda exchange: exchange.sequence_index,
+        default=None,
+    )
+    responses_before_successful_mutation = (
+        assistant_response_steps.get(
+            first_successful_mutation.message_index,
+            len(assistant_response_steps) + 1,
+        )
+        - 1
+        if first_successful_mutation is not None
+        else len(assistant_response_steps)
     )
     before_mutation = [
         exchange
@@ -1258,6 +1394,19 @@ def _run4_action_metrics(
             _count_run4_pytest_reruns_without_intervening_mutation(
                 run4_exchanges,
                 workspace,
+                initial_pending_command=initial_pending_command,
+            )
+        ),
+        "run4_started_with_pending_failed_test": (
+            initial_pending_command is not None
+        ),
+        "run4_initial_pending_command_present": (
+            initial_pending_command is not None
+        ),
+        "run4_initial_diagnosis_responses_used": (
+            min(
+                initial_diagnosis_responses,
+                responses_before_successful_mutation,
             )
         ),
         "run4_migration_reads": sum(
@@ -1272,7 +1421,10 @@ def _run4_action_metrics(
             exchange.name == "list_directory"
             for exchange in run4_exchanges
         ),
-        **_run4_progress_metrics(run4_exchanges),
+        **_run4_progress_metrics(
+            run4_exchanges,
+            initial_pending_command=initial_pending_command,
+        ),
     }
 
 
@@ -1286,7 +1438,7 @@ def analyze_history(
 ) -> dict[str, Any]:
     exchanges = collect_tool_exchanges(history, records)
     run4_action = _run4_action_metrics(
-        history, records, exchanges, workspace
+        history, records, exchanges, workspace, run_specs
     )
     tool_counts = Counter(exchange.name for exchange in exchanges)
     attempted_read_paths = {
@@ -1405,9 +1557,8 @@ def analyze_history(
     ]
     baseline_nonzero = len(baseline_payloads) == 1 and all(
         exchange.run_index == 3
-        and payload.get("exit_code") not in (None, 0)
-        and payload.get("timed_out") is False
-        for exchange, payload in baseline_payloads
+        and _tracked_pytest_result(exchange) is False
+        for exchange, _ in baseline_payloads
     )
     run4_pytest_calls = sum(
         exchange.run_index == 4
@@ -1831,7 +1982,9 @@ def assert_preflight(
         == (CHALLENGE_PYTEST_COMMAND,)
         and run4_progress_guard.mutation_tool_names
         == ("edit_file", "write_file")
-        and run4_progress_guard.diagnosis_responses == 1,
+        and run4_progress_guard.diagnosis_responses == 1
+        and run4_progress_guard.initial_pending_command is None
+        and run4_progress_guard.initial_diagnosis_responses == 0,
         "Run 4 Progress Guard configuration is unexpected.",
     )
     require(
@@ -2161,8 +2314,12 @@ def build_failure_report(
             "run4_pytest_reruns_without_intervening_mutation": 0,
             "run4_read_only_responses_after_failed_test": 0,
             "run4_progress_guard_interventions": 0,
+            "run4_pretest_guard_interventions": 0,
             "run4_successful_mutations_after_failed_test": 0,
             "run4_pending_failed_test_at_run_end": None,
+            "run4_started_with_pending_failed_test": None,
+            "run4_initial_pending_command_present": None,
+            "run4_initial_diagnosis_responses_used": 0,
             "run4_did_not_rerun_failed_pytest_without_intervening_mutation": (
                 None
             ),
@@ -2195,6 +2352,7 @@ def execute_real_challenge(client: LLMClient) -> dict[str, Any]:
     tokens = build_tokens()
     fixture = build_long_running_fixture(tokens)
     specs = build_run_specs(tokens)
+    effective_specs = list(specs)
     temporary_root_path: Path | None = None
     workspace: Path | None = None
     phase = "temporary workspace setup"
@@ -2219,6 +2377,7 @@ def execute_real_challenge(client: LLMClient) -> dict[str, Any]:
     evidence_result = EvidenceResult()
     before_evidence_manifest: FileManifest = {}
     final_evidence_attempted = False
+    pending_tracked_failure: PendingTrackedFailure | None = None
 
     try:
         with TemporaryDirectory(
@@ -2323,22 +2482,49 @@ def execute_real_challenge(client: LLMClient) -> dict[str, Any]:
                 for spec in specs:
                     phase = f"Run {spec.index}: {spec.name}"
                     same_agent = same_agent and id(agent) == agent_identity
+                    effective_spec = spec
+                    if spec.index == 4:
+                        require(
+                            pending_tracked_failure is not None,
+                            "Run 3 did not produce the tracked failure handoff.",
+                        )
+                        effective_spec = seed_run_progress_guard(
+                            spec,
+                            pending_tracked_failure,
+                            initial_diagnosis_responses=(
+                                RUN4_INITIAL_DIAGNOSIS_RESPONSES
+                            ),
+                        )
+                        effective_specs[3] = effective_spec
                     record = RunRecord(
-                        index=spec.index,
-                        name=spec.name,
+                        index=effective_spec.index,
+                        name=effective_spec.name,
                         require_verified_completion=(
-                            spec.require_verified_completion
+                            effective_spec.require_verified_completion
                         ),
                     )
                     run_records.append(record)
                     answer = run_agent_stage(
                         agent,
                         recording,
-                        spec,
+                        effective_spec,
                         record,
                         workspace,
                     )
-                    if spec.index == 4:
+                    if effective_spec.index == 3:
+                        pending_tracked_failure = (
+                            derive_pending_tracked_failure(
+                                agent.history,
+                                run_records,
+                                run_index=3,
+                                tracked_commands=(CHALLENGE_PYTEST_COMMAND,),
+                            )
+                        )
+                        require(
+                            pending_tracked_failure is not None,
+                            "Run 3 baseline did not leave a pending tracked failure.",
+                        )
+                    if effective_spec.index == 4:
                         final_answer = answer
 
                 phase = "final evidence preservation"
@@ -2470,7 +2656,7 @@ def execute_real_challenge(client: LLMClient) -> dict[str, Any]:
         history,
         run_records,
         tokens,
-        specs,
+        tuple(effective_specs),
         recording.request_inputs if recording is not None else [],
         workspace,
     )
@@ -2757,6 +2943,9 @@ def execute_real_challenge(client: LLMClient) -> dict[str, Any]:
         "run3_did_not_force_verification": (
             history_analysis["run3_verification_calls"] == 0
         ),
+        "run3_failed_test_handed_to_run4": history_analysis[
+            "run4_started_with_pending_failed_test"
+        ],
         "run3_used_only_expected_commands": (
             history_analysis["run3_unexpected_run_commands"] == 0
         ),
@@ -2839,6 +3028,7 @@ def execute_real_challenge(client: LLMClient) -> dict[str, Any]:
         duplicate_complete_reads_before_first_mutation=(
             run4_duplicate_complete_reads_before_first_mutation
         ),
+        pytest_calls=history_analysis["run4_pytest_calls"],
         pytest_reruns_without_intervening_mutation=(
             run4_pytest_reruns_without_intervening_mutation
         ),
@@ -2985,8 +3175,20 @@ def execute_real_challenge(client: LLMClient) -> dict[str, Any]:
             "run4_progress_guard_interventions": history_analysis[
                 "run4_progress_guard_interventions"
             ],
+            "run4_pretest_guard_interventions": history_analysis[
+                "run4_pretest_guard_interventions"
+            ],
             "run4_successful_mutations_after_failed_test": history_analysis[
                 "run4_successful_mutations_after_failed_test"
+            ],
+            "run4_started_with_pending_failed_test": history_analysis[
+                "run4_started_with_pending_failed_test"
+            ],
+            "run4_initial_pending_command_present": history_analysis[
+                "run4_initial_pending_command_present"
+            ],
+            "run4_initial_diagnosis_responses_used": history_analysis[
+                "run4_initial_diagnosis_responses_used"
             ],
             "run4_pending_failed_test_at_run_end": (
                 run4_pending_failed_test_at_run_end
@@ -3217,6 +3419,22 @@ def print_summary(report: dict[str, Any]) -> None:
             )
         )
     )
+    print(
+        "Run 4 Started With Pending Failed Test: "
+        + _action_status(
+            report.get("run4_started_with_pending_failed_test")
+        )
+    )
+    print(
+        "Run 4 Initial Pending Command Present: "
+        + _action_status(
+            report.get("run4_initial_pending_command_present")
+        )
+    )
+    print(
+        "Initial Diagnosis Responses Used: "
+        f"{report.get('run4_initial_diagnosis_responses_used', 0)}"
+    )
     print(f"Run 4 pytest Calls: {report.get('run4_pytest_calls', 0)}")
     print(
         "Pytest Reruns Without Intervening Production Mutation: "
@@ -3229,6 +3447,10 @@ def print_summary(report: dict[str, Any]) -> None:
     print(
         "Progress Guard Interventions: "
         f"{report.get('run4_progress_guard_interventions', 0)}"
+    )
+    print(
+        "Pre-pytest Progress Guard Interventions: "
+        f"{report.get('run4_pretest_guard_interventions', 0)}"
     )
     print(
         "Successful Mutations After Failed Pytest: "

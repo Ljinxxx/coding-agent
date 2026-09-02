@@ -7,6 +7,7 @@ from src.tool_execution import ToolExecutionResult
 
 
 COMMAND_TOOL_NAME = "run_command"
+VERIFICATION_TOOL_NAME = "verify_workspace"
 PROGRESS_GUARD_ERROR_TYPE = "ProgressGuardBlocked"
 
 
@@ -39,6 +40,8 @@ class ProgressGuardConfig:
     tracked_commands: tuple[str, ...]
     mutation_tool_names: tuple[str, ...]
     diagnosis_responses: int = 1
+    initial_pending_command: str | None = None
+    initial_diagnosis_responses: int = 0
 
     def __post_init__(self) -> None:
         tracked_commands = _normalized_nonempty_values(
@@ -61,6 +64,35 @@ class ProgressGuardConfig:
             raise ValueError(
                 "diagnosis_responses must be a non-negative integer."
             )
+        initial_pending_command = self.initial_pending_command
+        if initial_pending_command is not None:
+            if (
+                not isinstance(initial_pending_command, str)
+                or not initial_pending_command.strip()
+            ):
+                raise ValueError(
+                    "initial_pending_command must be a non-empty string or None."
+                )
+            initial_pending_command = initial_pending_command.strip()
+            if initial_pending_command not in tracked_commands:
+                raise ValueError(
+                    "initial_pending_command must be one of tracked_commands."
+                )
+        if (
+            isinstance(self.initial_diagnosis_responses, bool)
+            or not isinstance(self.initial_diagnosis_responses, int)
+            or self.initial_diagnosis_responses < 0
+        ):
+            raise ValueError(
+                "initial_diagnosis_responses must be a non-negative integer."
+            )
+        if (
+            initial_pending_command is None
+            and self.initial_diagnosis_responses != 0
+        ):
+            raise ValueError(
+                "initial_diagnosis_responses requires initial_pending_command."
+            )
 
         object.__setattr__(self, "tracked_commands", tracked_commands)
         object.__setattr__(
@@ -68,10 +100,28 @@ class ProgressGuardConfig:
             "mutation_tool_names",
             mutation_tool_names,
         )
+        object.__setattr__(
+            self,
+            "initial_pending_command",
+            initial_pending_command,
+        )
 
 
 class ProgressGuard:
-    def __init__(self, config: ProgressGuardConfig) -> None:
+    def __init__(
+        self,
+        config: ProgressGuardConfig,
+        *,
+        initial_workspace_revision: int = 0,
+    ) -> None:
+        if (
+            isinstance(initial_workspace_revision, bool)
+            or not isinstance(initial_workspace_revision, int)
+            or initial_workspace_revision < 0
+        ):
+            raise ValueError(
+                "initial_workspace_revision must be a non-negative integer."
+            )
         self.config = config
         self.state = ProgressGuardState.NORMAL
         self.pending_command: str | None = None
@@ -79,6 +129,15 @@ class ProgressGuard:
         self._diagnosis_responses_remaining = 0
         self._failure_cycle = 0
         self._active_diagnosis_cycle: int | None = None
+        self._initial_pending_failure = False
+
+        if config.initial_pending_command is not None:
+            self._activate_pending_failure(
+                config.initial_pending_command,
+                initial_workspace_revision,
+                config.initial_diagnosis_responses,
+                initial=True,
+            )
 
     def begin_response(self) -> None:
         if self.state is ProgressGuardState.TEST_FAILED_DIAGNOSIS_ALLOWED:
@@ -114,6 +173,11 @@ class ProgressGuard:
 
         is_pending_retest = self._is_pending_retest(tool_name, arguments)
         if self.state is ProgressGuardState.TEST_FAILED_DIAGNOSIS_ALLOWED:
+            if self._initial_pending_failure and tool_name in {
+                COMMAND_TOOL_NAME,
+                VERIFICATION_TOOL_NAME,
+            }:
+                return False
             return not self._is_tracked_command(tool_name, arguments)
 
         if self.state is ProgressGuardState.RETEST_ALLOWED:
@@ -122,7 +186,17 @@ class ProgressGuard:
         return False
 
     def blocked_result(self, tool_name: str) -> ToolExecutionResult:
-        if self.state is ProgressGuardState.TEST_FAILED_DIAGNOSIS_ALLOWED:
+        if (
+            self.state is ProgressGuardState.TEST_FAILED_DIAGNOSIS_ALLOWED
+            and self._initial_pending_failure
+        ):
+            message = (
+                "A tracked repair check is already pending from an earlier "
+                "run. This command or verification call was not executed. "
+                "Use the bounded inspection allowance or make a successful "
+                "workspace-changing mutation before running commands."
+            )
+        elif self.state is ProgressGuardState.TEST_FAILED_DIAGNOSIS_ALLOWED:
             message = (
                 "A tracked repair check is currently failing. This retest "
                 "was not executed because a successful workspace-changing "
@@ -195,6 +269,7 @@ class ProgressGuard:
                 workspace_revision_after,
             )
         ):
+            self._initial_pending_failure = False
             self.state = ProgressGuardState.RETEST_ALLOWED
 
     def _record_failure(
@@ -202,12 +277,29 @@ class ProgressGuard:
         arguments: dict[str, Any],
         workspace_revision: int,
     ) -> None:
-        self.pending_command = self._normalized_command(arguments)
-        self.pending_failure_workspace_revision = workspace_revision
-        self._diagnosis_responses_remaining = (
-            self.config.diagnosis_responses
+        command = self._normalized_command(arguments)
+        if command is None:
+            return
+        self._activate_pending_failure(
+            command,
+            workspace_revision,
+            self.config.diagnosis_responses,
+            initial=False,
         )
+
+    def _activate_pending_failure(
+        self,
+        command: str,
+        workspace_revision: int,
+        diagnosis_responses: int,
+        *,
+        initial: bool,
+    ) -> None:
+        self.pending_command = command
+        self.pending_failure_workspace_revision = workspace_revision
+        self._diagnosis_responses_remaining = diagnosis_responses
         self._failure_cycle += 1
+        self._initial_pending_failure = initial
         if self._diagnosis_responses_remaining > 0:
             self.state = (
                 ProgressGuardState.TEST_FAILED_DIAGNOSIS_ALLOWED
@@ -220,6 +312,7 @@ class ProgressGuard:
         self.pending_command = None
         self.pending_failure_workspace_revision = None
         self._diagnosis_responses_remaining = 0
+        self._initial_pending_failure = False
 
     def _is_pending_retest(
         self,

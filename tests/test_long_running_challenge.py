@@ -467,6 +467,8 @@ def _progress_guard_blocked_exchange(
 def _analyze_run4_history(
     history: list[dict[str, object]],
     workspace: Path | None = None,
+    *,
+    initial_pending: bool = False,
 ) -> dict[str, object]:
     record = runner_module.RunRecord(
         index=4,
@@ -476,11 +478,21 @@ def _analyze_run4_history(
         history_start=0,
         history_end=len(history),
     )
+    run_specs = runner_module.build_run_specs(FIXED_TOKENS)
+    if initial_pending:
+        seeded_run4 = runner_module.seed_run_progress_guard(
+            run_specs[3],
+            runner_module.PendingTrackedFailure(
+                runner_module.CHALLENGE_PYTEST_COMMAND
+            ),
+            initial_diagnosis_responses=3,
+        )
+        run_specs = (*run_specs[:3], seeded_run4)
     return runner_module.analyze_history(
         history,
         [record],
         FIXED_TOKENS,
-        runner_module.build_run_specs(FIXED_TOKENS),
+        run_specs,
         [],
         workspace,
     )
@@ -541,6 +553,8 @@ def test_fixture_materialization_is_deterministic_and_isolated(
         "write_file",
     )
     assert run4_progress_guard.diagnosis_responses == 1
+    assert run4_progress_guard.initial_pending_command is None
+    assert run4_progress_guard.initial_diagnosis_responses == 0
     assert FIXED_TOKENS.release_token in run_specs[0].prompt
     assert all(
         FIXED_TOKENS.release_token not in spec.prompt
@@ -616,6 +630,68 @@ def test_run_agent_stage_forwards_only_the_run_spec_progress_guard(
     assert recording.run_indices == [1, 4]
 
 
+def test_run3_failure_handoff_seeds_the_runtime_run4_guard() -> None:
+    history = _run4_pytest_exchange("run3-baseline-fail", exit_code=1)
+    record = runner_module.RunRecord(
+        index=3,
+        name="Migration Audit and Baseline Diagnosis",
+        require_verified_completion=False,
+        completed=True,
+        history_start=0,
+        history_end=len(history),
+        workspace_revision_after=7,
+    )
+
+    failure = runner_module.derive_pending_tracked_failure(
+        history,
+        [record],
+        run_index=3,
+        tracked_commands=(runner_module.CHALLENGE_PYTEST_COMMAND,),
+    )
+    assert failure == runner_module.PendingTrackedFailure(
+        runner_module.CHALLENGE_PYTEST_COMMAND
+    )
+
+    run4 = runner_module.seed_run_progress_guard(
+        runner_module.build_run_specs(FIXED_TOKENS)[3],
+        failure,
+        initial_diagnosis_responses=3,
+    )
+    assert run4.progress_guard is not None
+    assert run4.progress_guard.initial_pending_command == (
+        runner_module.CHALLENGE_PYTEST_COMMAND
+    )
+    assert run4.progress_guard.initial_diagnosis_responses == 3
+    assert run4.progress_guard.diagnosis_responses == 1
+
+
+def test_run3_handoff_rejects_pass_timeout_and_wrong_command_results() -> None:
+    cases = (
+        _run4_pytest_exchange("run3-pass", exit_code=0),
+        _run4_pytest_exchange("run3-timeout", exit_code=1, timed_out=True),
+        _run4_pytest_exchange(
+            "run3-wrong-command",
+            exit_code=1,
+            command="python -B -m pytest -q",
+        ),
+    )
+    for history in cases:
+        record = runner_module.RunRecord(
+            index=3,
+            name="Migration Audit and Baseline Diagnosis",
+            require_verified_completion=False,
+            completed=True,
+            history_start=0,
+            history_end=len(history),
+        )
+        assert runner_module.derive_pending_tracked_failure(
+            history,
+            [record],
+            run_index=3,
+            tracked_commands=(runner_module.CHALLENGE_PYTEST_COMMAND,),
+        ) is None
+
+
 def test_fixture_public_cli_contract_defines_unsupported_severity_usage_error(
 ) -> None:
     fixture = build_long_running_fixture(FIXED_TOKENS)
@@ -629,6 +705,10 @@ def test_fixture_public_cli_contract_defines_unsupported_severity_usage_error(
         "cli usage error",
         "exit status 2",
         "before incident processing",
+        "programmatic `main(...)`",
+        "raise `systemexit(2)`",
+        "not return 2",
+        "before opening the input",
     ):
         assert public_contract_phrase in readme
 
@@ -676,7 +756,11 @@ def test_public_report_contract_is_consistent_across_public_surfaces() -> None:
         assert field in readme
         assert field in report_test
         assert field in cli_test
-    assert "assert payload == {" in cli_test
+    assert "assert payload == _expected_report_payload()" in cli_test
+    assert "subprocess.run" in cli_test
+    assert "sys.executable" in cli_test
+    assert '"-m", "incident.cli"' in cli_test
+    assert "_expected_report_payload" in cli_test
     for phrase in (
         "complete public v2 report schema",
         "incident.report.build_report",
@@ -734,6 +818,55 @@ def test_visible_cli_report_oracle_rejects_reduced_shape_and_accepts_complete_sh
     assert accepted.passed, accepted.stdout + accepted.stderr
 
 
+def test_visible_cli_contract_rejects_return_code_and_missing_module_entrypoint(
+    tmp_path: Path,
+) -> None:
+    fixture = build_long_running_fixture(FIXED_TOKENS)
+    reference = _reference_solution_files()
+    reference_cli = reference["incident/cli.py"]
+    parse_line = "    args = parser.parse_args(argv)\n"
+    main_block = (
+        '\n\nif __name__ == "__main__":\n'
+        "    raise SystemExit(main())\n"
+    )
+    assert reference_cli.count(parse_line) == 1
+    assert reference_cli.count(main_block) == 1
+    variants = (
+        (
+            "return-code",
+            reference_cli.replace(
+                parse_line,
+                (
+                    "    try:\n"
+                    "        args = parser.parse_args(argv)\n"
+                    "    except SystemExit as error:\n"
+                    "        return error.code\n"
+                ),
+            ),
+            "test_cli_rejects_unsupported_severity_before_opening_input",
+        ),
+        (
+            "missing-module-main",
+            reference_cli.replace(main_block, ""),
+            "test_cli_module_report_outputs_complete_v2_payload",
+        ),
+    )
+
+    for label, candidate, expected_test in variants:
+        workspace = tmp_path / label / "workspace"
+        materialize_long_running_fixture(fixture, workspace)
+        _write_files(workspace, reference)
+        _write_files(workspace, {"incident/cli.py": candidate})
+        rejected = run_visible_tests(
+            workspace,
+            basetemp=tmp_path / label / "pytest-tmp",
+        )
+        output = rejected.stdout + rejected.stderr
+        assert rejected.timed_out is False
+        assert rejected.exit_code not in (None, 0)
+        assert expected_test in output
+
+
 def test_public_report_contract_does_not_leak_hidden_concrete_inputs() -> None:
     fixture = build_long_running_fixture(FIXED_TOKENS)
     public_surfaces = "\n".join(
@@ -749,6 +882,7 @@ def test_public_report_contract_does_not_leak_hidden_concrete_inputs() -> None:
         "hidden-low",
         "hidden-cli-low",
         "hidden-cli-high",
+        '"invalid"',
     ):
         assert hidden_literal not in public_surfaces
 
@@ -1075,7 +1209,7 @@ def test_fixture_contains_required_long_running_repository_structure(
         for name, content in fixture.files.items()
         if name.startswith("tests/test_")
     )
-    assert 22 <= visible_test_items <= 25
+    assert visible_test_items == 26
 
     initial = run_visible_tests(
         workspace,
@@ -1500,6 +1634,7 @@ def test_functional_success_ignores_action_discipline_efficiency_warnings(
         error=None,
         first_mutation_step=7,
         duplicate_complete_reads_before_first_mutation=11,
+        pytest_calls=6,
         pytest_reruns_without_intervening_mutation=2,
     )
 
@@ -1570,6 +1705,7 @@ def test_action_discipline_passes_for_prompt_target_behavior(capsys) -> None:
         error=None,
         first_mutation_step=3,
         duplicate_complete_reads_before_first_mutation=0,
+        pytest_calls=2,
         pytest_reruns_without_intervening_mutation=0,
     )
 
@@ -1620,6 +1756,7 @@ def test_hidden_failure_still_fails_functional_when_action_discipline_passes(
         error=None,
         first_mutation_step=3,
         duplicate_complete_reads_before_first_mutation=0,
+        pytest_calls=1,
         pytest_reruns_without_intervening_mutation=0,
     )
 
@@ -2380,6 +2517,7 @@ def test_single_failed_pytest_with_32_read_only_responses_is_pending_warning(
         error=None,
         first_mutation_step=3,
         duplicate_complete_reads_before_first_mutation=0,
+        pytest_calls=1,
         pytest_reruns_without_intervening_mutation=0,
         pending_failed_test_at_run_end=True,
     )
@@ -2437,6 +2575,7 @@ def test_failed_pytest_mutate_retest_pass_clears_pending_progress() -> None:
         error=None,
         first_mutation_step=3,
         duplicate_complete_reads_before_first_mutation=0,
+        pytest_calls=2,
         pytest_reruns_without_intervening_mutation=analysis[
             "run4_pytest_reruns_without_intervening_mutation"
         ],
@@ -2446,6 +2585,82 @@ def test_failed_pytest_mutate_retest_pass_clears_pending_progress() -> None:
     )
     assert dimensions["run4_repair_loop_discipline_met"] is True
     assert dimensions["action_discipline_target_met"] is True
+
+
+def test_initial_pending_without_run4_pytest_stays_pending_and_cannot_pass(
+) -> None:
+    history = [
+        *_file_read_exchange("initial-read-1", "incident/parser.py"),
+        *_file_read_exchange("initial-read-2", "incident/service.py"),
+        *_file_read_exchange("initial-read-3", "tests/test_cli.py"),
+        *_progress_guard_blocked_exchange(
+            "initial-blocked-read",
+            "read_file",
+            {"path": "incident/store.py"},
+        ),
+    ]
+    analysis = _analyze_run4_history(history, initial_pending=True)
+
+    assert analysis["run4_started_with_pending_failed_test"] is True
+    assert analysis["run4_initial_pending_command_present"] is True
+    assert analysis["run4_initial_diagnosis_responses_used"] == 3
+    assert analysis["run4_pretest_guard_interventions"] == 1
+    assert analysis["run4_pytest_calls"] == 0
+    assert analysis["run4_pending_failed_test_at_run_end"] is True
+
+    dimensions = runner_module.evaluate_completion_dimensions(
+        functional=evaluate_functional_challenge(_passing_functional_metrics()),
+        extra_functional_requirements={"functional_outcome": True},
+        error=None,
+        first_mutation_step=None,
+        duplicate_complete_reads_before_first_mutation=0,
+        pytest_calls=0,
+        pytest_reruns_without_intervening_mutation=0,
+        pending_failed_test_at_run_end=True,
+    )
+    assert dimensions["run4_repair_loop_discipline_met"] is False
+    assert dimensions["action_discipline_target_met"] is False
+
+
+def test_initial_pending_direct_pytest_is_an_unmutated_rerun() -> None:
+    history = _run4_pytest_exchange("premature-retest", exit_code=0)
+    analysis = _analyze_run4_history(history, initial_pending=True)
+
+    assert analysis["run4_pytest_calls"] == 1
+    assert analysis["run4_pytest_reruns_without_intervening_mutation"] == 1
+    assert analysis["run4_pending_failed_test_at_run_end"] is False
+
+
+def test_initial_pending_mutation_then_passing_retest_clears_shared_state(
+) -> None:
+    history = [
+        *_tool_exchange(
+            "cross-run-repair",
+            "edit_file",
+            {"path": "incident/parser.py"},
+            "File edited successfully: incident/parser.py",
+        ),
+        *_run4_pytest_exchange("cross-run-pass", exit_code=0),
+    ]
+    analysis = _analyze_run4_history(history, initial_pending=True)
+
+    assert analysis["run4_started_with_pending_failed_test"] is True
+    assert analysis["run4_successful_mutations_after_failed_test"] == 1
+    assert analysis["run4_pytest_calls"] == 1
+    assert analysis["run4_pytest_reruns_without_intervening_mutation"] == 0
+    assert analysis["run4_pending_failed_test_at_run_end"] is False
+
+    dimensions = runner_module.evaluate_completion_dimensions(
+        functional=evaluate_functional_challenge(_passing_functional_metrics()),
+        extra_functional_requirements={"functional_outcome": True},
+        error=None,
+        first_mutation_step=1,
+        duplicate_complete_reads_before_first_mutation=0,
+        pytest_calls=1,
+        pytest_reruns_without_intervening_mutation=0,
+        pending_failed_test_at_run_end=False,
+    )
+    assert dimensions["run4_repair_loop_discipline_met"] is True
 
 
 def test_progress_guard_intervention_is_advisory_not_functional_failure(
@@ -2483,6 +2698,7 @@ def test_progress_guard_intervention_is_advisory_not_functional_failure(
         error=None,
         first_mutation_step=3,
         duplicate_complete_reads_before_first_mutation=0,
+        pytest_calls=2,
         pytest_reruns_without_intervening_mutation=0,
         pending_failed_test_at_run_end=False,
     )

@@ -154,11 +154,15 @@ def guard_config(
     diagnosis_responses: int = 1,
     tracked_commands: tuple[str, ...] = (TRACKED_COMMAND,),
     mutation_tool_names: tuple[str, ...] = ("edit_file", "write_file"),
+    initial_pending_command: str | None = None,
+    initial_diagnosis_responses: int = 0,
 ) -> ProgressGuardConfig:
     return ProgressGuardConfig(
         tracked_commands=tracked_commands,
         mutation_tool_names=mutation_tool_names,
         diagnosis_responses=diagnosis_responses,
+        initial_pending_command=initial_pending_command,
+        initial_diagnosis_responses=initial_diagnosis_responses,
     )
 
 
@@ -233,6 +237,14 @@ def test_progress_guard_config_rejects_simple_invalid_values() -> None:
         guard_config(mutation_tool_names=("",))
     with pytest.raises(ValueError, match="diagnosis_responses"):
         guard_config(diagnosis_responses=-1)
+    with pytest.raises(ValueError, match="initial_pending_command"):
+        guard_config(initial_pending_command="   ")
+    with pytest.raises(ValueError, match="initial_pending_command"):
+        guard_config(initial_pending_command=OTHER_COMMAND)
+    with pytest.raises(ValueError, match="initial_diagnosis_responses"):
+        guard_config(initial_diagnosis_responses=-1)
+    with pytest.raises(ValueError, match="initial_diagnosis_responses"):
+        guard_config(initial_diagnosis_responses=1)
 
 
 def test_one_diagnosis_response_allows_multiple_reads_then_blocks_broad_tools(
@@ -796,6 +808,183 @@ def test_progress_guard_state_resets_per_run_without_resetting_full_history(
     assert result_message(agent.history, "run-a-read") in second_run_first_request
 
 
+def test_initial_pending_failure_allows_three_responses_then_blocks_broad_tools(
+) -> None:
+    command = ScriptedCommandTool([CommandOutcome(1)])
+    read = RecordingTool("read_file")
+    listing = RecordingTool("list_directory")
+    verify = RecordingTool("verify_workspace")
+    llm = RecordingLLM(
+        [
+            tool_response(
+                ("run3-fail", "run_command", {"command": TRACKED_COMMAND})
+            ),
+            text_response("baseline-recorded"),
+            tool_response(
+                ("refresh-list", "list_directory", {"path": "."}),
+                ("blocked-diagnostic", "run_command", {"command": OTHER_COMMAND}),
+                ("blocked-verify", "verify_workspace", {}),
+                ("refresh-read-a", "read_file", {"path": "a.py"}),
+            ),
+            tool_response(("refresh-read-b", "read_file", {"path": "b.py"})),
+            tool_response(("refresh-list-two", "list_directory", {"path": "src"})),
+            tool_response(
+                ("blocked-read", "read_file", {"path": "c.py"}),
+                ("blocked-list", "list_directory", {"path": "tests"}),
+                ("blocked-retest", "run_command", {"command": TRACKED_COMMAND}),
+            ),
+            text_response("refresh-window-ended"),
+        ]
+    )
+    agent = Agent(
+        llm,
+        registry_with(command, read, listing, verify),
+        max_steps=5,
+    )
+
+    assert agent.run("Record the failing baseline.") == "baseline-recorded"
+    revision_at_handoff = agent.workspace_revision
+    assert agent.run(
+        "Begin a bounded repair refresh.",
+        progress_guard=guard_config(
+            initial_pending_command=TRACKED_COMMAND,
+            initial_diagnosis_responses=3,
+        ),
+    ) == "refresh-window-ended"
+
+    assert revision_at_handoff == 1
+    assert agent.workspace_revision == revision_at_handoff
+    assert command.calls == [TRACKED_COMMAND]
+    assert read.calls == [{"path": "a.py"}, {"path": "b.py"}]
+    assert listing.calls == [{"path": "."}, {"path": "src"}]
+    assert verify.calls == []
+    for call_id in (
+        "blocked-diagnostic",
+        "blocked-verify",
+        "blocked-read",
+        "blocked-list",
+        "blocked-retest",
+    ):
+        assert result_payload(agent.history, call_id)["error_type"] == (
+            "ProgressGuardBlocked"
+        )
+
+
+def test_initial_pending_mutation_allows_only_exact_retest_then_clears(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.py").write_text("a", encoding="utf-8")
+    (tmp_path / "b.py").write_text("b", encoding="utf-8")
+    command = ScriptedCommandTool([CommandOutcome(1), CommandOutcome(0)])
+    verify = RecordingTool("verify_workspace")
+    llm = RecordingLLM(
+        [
+            tool_response(
+                ("run3-fail", "run_command", {"command": TRACKED_COMMAND})
+            ),
+            text_response("baseline-recorded"),
+            tool_response(("refresh-a", "read_file", {"path": "a.py"})),
+            tool_response(("refresh-b", "read_file", {"path": "b.py"})),
+            tool_response(("refresh-list", "list_directory", {"path": "."})),
+            tool_response(
+                (
+                    "repair",
+                    "write_file",
+                    {"path": "fixed.py", "content": "fixed"},
+                ),
+                ("wrong-command", "run_command", {"command": OTHER_COMMAND}),
+                ("exact-retest", "run_command", {"command": TRACKED_COMMAND}),
+                ("normal-read", "read_file", {"path": "fixed.py"}),
+                ("normal-verify", "verify_workspace", {}),
+            ),
+            text_response("repair-complete"),
+        ]
+    )
+    agent = Agent(
+        llm,
+        registry_with(
+            command,
+            ReadFileTool(tmp_path),
+            ListDirectoryTool(tmp_path),
+            WriteFileTool(tmp_path),
+            verify,
+        ),
+        max_steps=5,
+    )
+
+    assert agent.run("Record the failing baseline.") == "baseline-recorded"
+    revision_at_handoff = agent.workspace_revision
+    assert agent.run(
+        "Repair and run the exact pending check.",
+        progress_guard=guard_config(
+            mutation_tool_names=("write_file",),
+            initial_pending_command=TRACKED_COMMAND,
+            initial_diagnosis_responses=3,
+        ),
+    ) == "repair-complete"
+
+    assert command.calls == [TRACKED_COMMAND, TRACKED_COMMAND]
+    assert agent.workspace_revision > revision_at_handoff
+    assert (tmp_path / "fixed.py").read_text(encoding="utf-8") == "fixed"
+    assert result_payload(agent.history, "wrong-command")["error_type"] == (
+        "ProgressGuardBlocked"
+    )
+    assert result_payload(agent.history, "exact-retest")["exit_code"] == 0
+    assert result_message(agent.history, "normal-read")["content"].startswith(
+        "[read_file]"
+    )
+    assert verify.calls == [{}]
+
+
+def test_initial_and_post_failure_diagnosis_budgets_are_independent(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "source.py").write_text("old", encoding="utf-8")
+    command = ScriptedCommandTool([CommandOutcome(1), CommandOutcome(2)])
+    read = RecordingTool("read_file")
+    llm = RecordingLLM(
+        [
+            tool_response(
+                ("run3-fail", "run_command", {"command": TRACKED_COMMAND})
+            ),
+            text_response("baseline-recorded"),
+            tool_response(
+                (
+                    "repair",
+                    "write_file",
+                    {"path": "source.py", "content": "changed"},
+                ),
+                ("retest-fail", "run_command", {"command": TRACKED_COMMAND}),
+            ),
+            tool_response(("diagnose-once", "read_file", {"path": "one.py"})),
+            tool_response(("blocked-second", "read_file", {"path": "two.py"})),
+            text_response("still-pending"),
+        ]
+    )
+    agent = Agent(
+        llm,
+        registry_with(command, read, WriteFileTool(tmp_path)),
+        max_steps=4,
+    )
+
+    assert agent.run("Record the failing baseline.") == "baseline-recorded"
+    assert agent.run(
+        "Repair with separate diagnosis budgets.",
+        progress_guard=guard_config(
+            mutation_tool_names=("write_file",),
+            diagnosis_responses=1,
+            initial_pending_command=TRACKED_COMMAND,
+            initial_diagnosis_responses=3,
+        ),
+    ) == "still-pending"
+
+    assert command.calls == [TRACKED_COMMAND, TRACKED_COMMAND]
+    assert read.calls == [{"path": "one.py"}]
+    assert result_payload(agent.history, "blocked-second")["error_type"] == (
+        "ProgressGuardBlocked"
+    )
+
+
 def test_progress_guard_does_not_add_model_steps_or_pollute_execution_budget(
 ) -> None:
     command = ScriptedCommandTool([CommandOutcome(1)])
@@ -826,6 +1015,44 @@ def test_progress_guard_does_not_add_model_steps_or_pollute_execution_budget(
             f"{5 - index}"
         ) in budgets[0]["content"]
     assert EXECUTION_BUDGET_HEADER not in json.dumps(agent.history)
+
+
+def test_initial_pending_guard_stops_a_forty_response_read_only_loop() -> None:
+    read = RecordingTool("read_file")
+    responses = [
+        tool_response(
+            (
+                f"read-loop-{index}",
+                "read_file",
+                {"path": f"module-{index}.py"},
+            )
+        )
+        for index in range(1, 41)
+    ]
+    agent = Agent(
+        RecordingLLM(responses),
+        registry_with(read),
+        max_steps=40,
+    )
+
+    with pytest.raises(AgentMaxStepsError, match="40"):
+        agent.run(
+            "Do not allow a seeded failure to degrade into a read-only loop.",
+            progress_guard=guard_config(
+                initial_pending_command=TRACKED_COMMAND,
+                initial_diagnosis_responses=3,
+            ),
+        )
+
+    assert read.calls == [
+        {"path": "module-1.py"},
+        {"path": "module-2.py"},
+        {"path": "module-3.py"},
+    ]
+    for index in range(4, 41):
+        assert result_payload(agent.history, f"read-loop-{index}")[
+            "error_type"
+        ] == "ProgressGuardBlocked"
 
 
 def test_blocked_results_remain_bounded_and_compact_as_generic_tool_errors(

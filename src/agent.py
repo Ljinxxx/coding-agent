@@ -378,7 +378,10 @@ class Agent:
             raise TypeError(
                 "progress_guard must be a ProgressGuardConfig or None."
             )
-        return ProgressGuard(config)
+        return ProgressGuard(
+            config,
+            initial_workspace_revision=self._workspace_revision,
+        )
 
     def run(
         self,
