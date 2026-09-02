@@ -316,6 +316,87 @@ def test_one_diagnosis_response_allows_multiple_reads_then_blocks_broad_tools(
     assert llm.calls[-1]["messages"][-4:] == tool_messages(agent.history)[-4:]
 
 
+def test_two_diagnosis_responses_allow_two_rounds_then_block_the_third() -> None:
+    command = ScriptedCommandTool([CommandOutcome(1)])
+    read = RecordingTool("read_file")
+    llm = RecordingLLM(
+        [
+            tool_response(
+                ("fail", "run_command", {"command": TRACKED_COMMAND})
+            ),
+            tool_response(("diagnose-one", "read_file", {"path": "one.py"})),
+            tool_response(("diagnose-two", "read_file", {"path": "two.py"})),
+            tool_response(
+                ("blocked-third", "read_file", {"path": "three.py"})
+            ),
+            text_response("diagnosis-complete"),
+        ]
+    )
+    agent = Agent(llm, registry_with(command, read), max_steps=5)
+
+    assert agent.run(
+        "Use two bounded diagnosis responses.",
+        require_verified_completion=False,
+        progress_guard=guard_config(diagnosis_responses=2),
+    ) == "diagnosis-complete"
+
+    assert read.calls == [{"path": "one.py"}, {"path": "two.py"}]
+    assert result_payload(agent.history, "blocked-third")["error_type"] == (
+        "ProgressGuardBlocked"
+    )
+
+
+def test_mutation_during_second_diagnosis_response_immediately_allows_retest(
+) -> None:
+    command = ScriptedCommandTool([CommandOutcome(1), CommandOutcome(0)])
+    read = RecordingTool("read_file")
+    edit = RecordingTool(
+        "edit_file",
+        mutates_workspace=True,
+        default_result="File edited successfully: source.py",
+    )
+    llm = RecordingLLM(
+        [
+            tool_response(
+                ("fail", "run_command", {"command": TRACKED_COMMAND})
+            ),
+            tool_response(
+                ("diagnose", "read_file", {"path": "source.py"})
+            ),
+            tool_response(
+                (
+                    "repair",
+                    "edit_file",
+                    {"path": "source.py", "content": "fixed"},
+                )
+            ),
+            tool_response(
+                ("blocked-other", "run_command", {"command": OTHER_COMMAND}),
+                ("exact-retest", "run_command", {"command": TRACKED_COMMAND}),
+            ),
+            text_response("repair-complete"),
+        ]
+    )
+    agent = Agent(
+        llm,
+        registry_with(command, read, edit),
+        max_steps=5,
+    )
+
+    assert agent.run(
+        "Mutate before the diagnosis budget is exhausted.",
+        require_verified_completion=False,
+        progress_guard=guard_config(diagnosis_responses=2),
+    ) == "repair-complete"
+
+    assert edit.calls == [{"path": "source.py", "content": "fixed"}]
+    assert command.calls == [TRACKED_COMMAND, TRACKED_COMMAND]
+    assert result_payload(agent.history, "blocked-other")["error_type"] == (
+        "ProgressGuardBlocked"
+    )
+    assert result_payload(agent.history, "exact-retest")["exit_code"] == 0
+
+
 def test_zero_diagnosis_responses_blocks_the_first_followup_read() -> None:
     command = ScriptedCommandTool([CommandOutcome(1)])
     read = RecordingTool("read_file")

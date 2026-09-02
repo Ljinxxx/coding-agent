@@ -78,7 +78,7 @@ CHALLENGE_NAME = "Long-Horizon Repository Repair"
 SCENARIO_NAME = "Incident Triage Service v2 Release Recovery"
 CHALLENGE_MAX_STEPS = 40
 RUN4_INITIAL_DIAGNOSIS_RESPONSES = 3
-PREFERRED_RUN4_FIRST_MUTATION_STEP_MAX = 4
+PREFERRED_RUN4_FIRST_MUTATION_STEP_MAX = 5
 PREFERRED_RUN4_DUPLICATE_COMPLETE_READS = 0
 PREFERRED_RUN4_PYTEST_RERUNS_WITHOUT_INTERVENING_MUTATION = 0
 CHALLENGE_PYTEST_ARGUMENTS = (
@@ -760,6 +760,10 @@ audit, baseline failing pytest, and the BLOCKED diagnostic are already
 complete in this same Agent history. Use that history. Do not restart the
 investigation or rediscover previously retained directives or MIGRATION_KEY.
 
+Several public parser and CLI behaviors may already be correct in the starting
+workspace. Preserve behavior that already passes the visible tests and focus
+changes on actual failing release-contract behavior.
+
 Action protocol:
 
 1. Use at most the first three model responses for one bounded refresh of the
@@ -790,7 +794,7 @@ Phase B - first edit_file or write_file mutation (no later than response 4).
 Phase C - implement the v2 repair.
 Phase D - run `{CHALLENGE_PYTEST_COMMAND}`.
 Phase E - after any non-zero result from that fixed pytest command, do not
-immediately rerun it. Use at most one following model response for targeted
+immediately rerun it. Use at most two following model responses for targeted
 diagnosis: diagnose the concrete failure from its output, inspecting only the
 failing test files named by the output and the directly implicated incident/*.py
 production files. Then make at least one
@@ -850,7 +854,7 @@ Do not ask the user for them again."""
             ProgressGuardConfig(
                 tracked_commands=(CHALLENGE_PYTEST_COMMAND,),
                 mutation_tool_names=("edit_file", "write_file"),
-                diagnosis_responses=1,
+                diagnosis_responses=2,
             ),
         ),
     )
@@ -1982,7 +1986,7 @@ def assert_preflight(
         == (CHALLENGE_PYTEST_COMMAND,)
         and run4_progress_guard.mutation_tool_names
         == ("edit_file", "write_file")
-        and run4_progress_guard.diagnosis_responses == 1
+        and run4_progress_guard.diagnosis_responses == 2
         and run4_progress_guard.initial_pending_command is None
         and run4_progress_guard.initial_diagnosis_responses == 0,
         "Run 4 Progress Guard configuration is unexpected.",
@@ -3368,7 +3372,7 @@ def print_summary(report: dict[str, Any]) -> None:
     )
     print(
         "Production Files Changed: "
-        f"{report.get('production_files_changed', 0)} (minimum 5)"
+        f"{report.get('production_files_changed', 0)} (minimum 3)"
     )
     print(f"Files Created: {report.get('files_created', 0)} (minimum 1)")
     print("\nPhase Discipline")

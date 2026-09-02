@@ -346,6 +346,10 @@ contains actionable-incident counts for LOW, MEDIUM, HIGH, and CRITICAL, with
 all four keys present even when a count is zero. `incidents` contains the
 serialized actionable incidents in their required output order, using the
 public `id`, `severity`, `timestamp`, and `message` serialization fields.
+The public report function signature is
+`incident.report.build_report(received, actionable)`. `received` contains all
+parsed incidents before actionable selection. `actionable` contains the
+selected, deduplicated, and ordered incidents.
 
 Do not modify release inputs or tests.
 '''
@@ -399,21 +403,29 @@ class Incident:
 ''',
         "incident/constants.py": '''SEVERITY_ORDER = {
     "LOW": 0,
-    "HIGH": 1,
-    "MEDIUM": 2,
+    "MEDIUM": 1,
+    "HIGH": 2,
     "CRITICAL": 3,
 }
 ''',
-        "incident/parser.py": '''from incident.models import Incident
+        "incident/parser.py": '''from incident.constants import SEVERITY_ORDER
+from incident.models import Incident
 
 
 def parse_incident(line: str) -> Incident:
-    incident_id, severity, timestamp, message = line.split("|")
+    parts = line.split("|")
+    if len(parts) != 4:
+        raise ValueError("incident line must contain four fields")
+    incident_id, severity, timestamp, message = parts
+    incident_id = incident_id.strip()
+    severity = severity.strip().upper()
+    if severity not in SEVERITY_ORDER:
+        raise ValueError(f"unknown severity: {severity}")
     return Incident(
         incident_id=incident_id,
-        severity=severity.strip(),
-        timestamp=int(timestamp),
-        message=" ".join(message.split()),
+        severity=severity,
+        timestamp=int(timestamp.strip()),
+        message=message.strip(),
     )
 ''',
         "incident/store.py": '''class IncidentStore:
@@ -444,7 +456,7 @@ def select_actionable(incidents, min_severity):
 ''',
         "incident/serializer.py": '''def serialize_incident(incident):
     return {
-        "incident_id": incident.incident_id,
+        "id": incident.incident_id,
         "severity": incident.severity,
         "timestamp": str(incident.timestamp),
         "message": incident.message,
@@ -453,9 +465,17 @@ def select_actionable(incidents, min_severity):
         "incident/cli.py": '''import argparse
 import json
 
+from incident.constants import SEVERITY_ORDER
 from incident.parser import parse_incident
 from incident.serializer import serialize_incident
 from incident.service import select_actionable
+
+
+def _severity(value):
+    normalized = value.strip().upper()
+    if normalized not in SEVERITY_ORDER:
+        raise argparse.ArgumentTypeError(f"unknown severity: {value}")
+    return normalized
 
 
 def main(argv=None):
@@ -465,14 +485,25 @@ def main(argv=None):
         nargs="?",
         default="data/sample_incidents.txt",
     )
-    parser.add_argument("--min-severity", default="MEDIUM")
+    parser.add_argument(
+        "--min-severity",
+        type=_severity,
+        default="MEDIUM",
+    )
+    parser.add_argument("--report", action="store_true")
     args = parser.parse_args(argv)
     with open(args.input_path, encoding="utf-8") as input_file:
         received = [
             parse_incident(line) for line in input_file if line.strip()
         ]
     actionable = select_actionable(received, args.min_severity)
-    print(json.dumps([serialize_incident(item) for item in actionable]))
+    if args.report:
+        from incident.report import build_report
+
+        payload = build_report(received, actionable)
+    else:
+        payload = [serialize_incident(item) for item in actionable]
+    print(json.dumps(payload, sort_keys=True))
     return 0
 
 

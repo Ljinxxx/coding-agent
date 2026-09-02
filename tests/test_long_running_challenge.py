@@ -1,6 +1,7 @@
 import inspect
 import json
 import re
+import sys
 import time
 from dataclasses import replace
 from datetime import datetime
@@ -308,7 +309,7 @@ def _minimum_coverage_metrics() -> LongRunningMetrics:
         llm_calls=20,
         tool_calls=30,
         distinct_files_read=10,
-        production_files_changed=5,
+        production_files_changed=3,
         files_created=1,
         pagination_reads=8,
         compaction_bearing_requests=3,
@@ -552,7 +553,7 @@ def test_fixture_materialization_is_deterministic_and_isolated(
         "edit_file",
         "write_file",
     )
-    assert run4_progress_guard.diagnosis_responses == 1
+    assert run4_progress_guard.diagnosis_responses == 2
     assert run4_progress_guard.initial_pending_command is None
     assert run4_progress_guard.initial_diagnosis_responses == 0
     assert FIXED_TOKENS.release_token in run_specs[0].prompt
@@ -662,7 +663,7 @@ def test_run3_failure_handoff_seeds_the_runtime_run4_guard() -> None:
         runner_module.CHALLENGE_PYTEST_COMMAND
     )
     assert run4.progress_guard.initial_diagnosis_responses == 3
-    assert run4.progress_guard.diagnosis_responses == 1
+    assert run4.progress_guard.diagnosis_responses == 2
 
 
 def test_run3_handoff_rejects_pass_timeout_and_wrong_command_results() -> None:
@@ -744,10 +745,13 @@ def test_public_report_contract_is_consistent_across_public_surfaces() -> None:
     for phrase in (
         "--report",
         "incident.report.build_report",
+        "incident.report.build_report(received, actionable)",
         "complete v2 report schema",
         "exactly these top-level fields",
         "serialized actionable incidents",
         "required output order",
+        "all parsed incidents before actionable selection",
+        "selected, deduplicated, and ordered incidents",
     ):
         assert phrase in readme
     for severity in ("low", "medium", "high", "critical"):
@@ -1002,9 +1006,9 @@ def test_run4_prompt_enforces_execution_phase_and_action_deadline() -> None:
     assert "no later than response 3" not in run_4
 
 
-def test_run4_mutation_deadline_accepts_four_but_not_later_or_missing() -> None:
-    assert runner_module.run4_mutation_deadline_met(4) is True
-    assert runner_module.run4_mutation_deadline_met(5) is False
+def test_run4_mutation_deadline_accepts_five_but_not_later_or_missing() -> None:
+    assert runner_module.run4_mutation_deadline_met(5) is True
+    assert runner_module.run4_mutation_deadline_met(6) is False
     assert runner_module.run4_mutation_deadline_met(None) is False
 
 
@@ -1062,7 +1066,7 @@ def test_run4_prompt_requires_fail_diagnose_mutate_retest_cycle() -> None:
     for phrase in (
         "after any non-zero result",
         "do not immediately rerun it",
-        "at most one following model response",
+        "at most two following model responses",
         "diagnose the concrete failure from its output",
         "only the failing test files named by the output",
         "directly implicated incident/*.py production files",
@@ -1217,6 +1221,91 @@ def test_fixture_contains_required_long_running_repository_structure(
     )
     assert initial.timed_out is False
     assert initial.exit_code not in (None, 0)
+    initial_output = initial.stdout + initial.stderr
+    summary = re.search(
+        r"(?P<failed>\d+) failed, (?P<passed>\d+) passed",
+        initial_output,
+    )
+    assert summary is not None, initial_output
+    assert 5 <= int(summary.group("failed")) <= 12
+
+    failed_nodes = re.findall(
+        r"FAILED (tests/test_[^:]+\.py)::([^\s]+)",
+        initial_output,
+    )
+    failed_modules = {path for path, _ in failed_nodes}
+    assert failed_modules == {
+        "tests/test_store.py",
+        "tests/test_service.py",
+        "tests/test_serializer.py",
+        "tests/test_report.py",
+        "tests/test_cli.py",
+    }
+    assert all(path != "tests/test_parser.py" for path, _ in failed_nodes)
+    base_cli_nodes = {
+        "test_cli_outputs_default_json_list",
+        "test_cli_accepts_lowercase_minimum_severity",
+        "test_cli_rejects_unsupported_severity_with_usage_error",
+        "test_cli_rejects_unsupported_severity_before_opening_input",
+    }
+    assert not base_cli_nodes.intersection(
+        node.split("[")[0] for path, node in failed_nodes
+        if path == "tests/test_cli.py"
+    )
+
+
+def test_reduced_fixture_parser_and_base_cli_start_correct(
+    tmp_path: Path,
+) -> None:
+    fixture = build_long_running_fixture(FIXED_TOKENS)
+    workspace = tmp_path / "workspace"
+    materialize_long_running_fixture(fixture, workspace)
+    assert not (workspace / "incident/report.py").exists()
+
+    selected = runner_module.run_host_process(
+        [
+            sys.executable,
+            "-B",
+            "-m",
+            "pytest",
+            "-q",
+            "tests/test_parser.py",
+            "tests/test_cli.py::test_cli_outputs_default_json_list",
+            "tests/test_cli.py::test_cli_accepts_lowercase_minimum_severity",
+            (
+                "tests/test_cli.py::"
+                "test_cli_rejects_unsupported_severity_with_usage_error"
+            ),
+            (
+                "tests/test_cli.py::"
+                "test_cli_rejects_unsupported_severity_before_opening_input"
+            ),
+            f"--basetemp={tmp_path / 'initial-correct-pytest'}",
+            "-p",
+            "no:cacheprovider",
+        ],
+        workspace,
+        timeout=30,
+    )
+    assert selected.passed, selected.stdout + selected.stderr
+
+    module_cli = runner_module.run_host_process(
+        [
+            sys.executable,
+            "-B",
+            "-m",
+            "incident.cli",
+            "data/sample_incidents.txt",
+            "--min-severity",
+            "high",
+        ],
+        workspace,
+        timeout=10,
+    )
+    assert module_cli.passed, module_cli.stdout + module_cli.stderr
+    payload = json.loads(module_cli.stdout)
+    assert isinstance(payload, list) and payload
+    assert all("id" in item for item in payload)
 
 
 def test_migration_notes_place_directives_across_late_pages() -> None:
@@ -1429,7 +1518,7 @@ def test_long_running_coverage_requires_all_minimum_metrics() -> None:
         "llm_calls": 19,
         "tool_calls": 29,
         "distinct_files_read": 9,
-        "production_files_changed": 4,
+        "production_files_changed": 2,
         "files_created": 0,
         "pagination_reads": 7,
         "compaction_bearing_requests": 2,
@@ -1632,7 +1721,7 @@ def test_functional_success_ignores_action_discipline_efficiency_warnings(
         ),
         extra_functional_requirements={"functional_outcome": True},
         error=None,
-        first_mutation_step=7,
+        first_mutation_step=6,
         duplicate_complete_reads_before_first_mutation=11,
         pytest_calls=6,
         pytest_reruns_without_intervening_mutation=2,
@@ -1672,7 +1761,7 @@ def test_functional_success_ignores_action_discipline_efficiency_warnings(
 
     report = {
         **dimensions,
-        "run4_first_mutation_step": 7,
+        "run4_first_mutation_step": 6,
         "run4_reads_before_first_mutation": 26,
         "run4_duplicate_complete_reads_before_first_mutation": 11,
         "run4_pytest_reruns_without_intervening_mutation": 2,
@@ -1703,7 +1792,7 @@ def test_action_discipline_passes_for_prompt_target_behavior(capsys) -> None:
         ),
         extra_functional_requirements={"functional_outcome": True},
         error=None,
-        first_mutation_step=3,
+        first_mutation_step=5,
         duplicate_complete_reads_before_first_mutation=0,
         pytest_calls=2,
         pytest_reruns_without_intervening_mutation=0,
@@ -1730,7 +1819,7 @@ def test_action_discipline_passes_for_prompt_target_behavior(capsys) -> None:
     runner_module.print_summary(
         {
             **dimensions,
-            "run4_first_mutation_step": 3,
+            "run4_first_mutation_step": 5,
             "run4_duplicate_complete_reads_before_first_mutation": 0,
             "run4_pytest_reruns_without_intervening_mutation": 0,
             "run4_pytest_calls": 2,

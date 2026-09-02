@@ -423,8 +423,8 @@ def evaluate_long_running_coverage(
         ("tool_calls >= 30", metrics.tool_calls >= 30),
         ("distinct_files_read >= 10", metrics.distinct_files_read >= 10),
         (
-            "production_files_changed >= 5",
-            metrics.production_files_changed >= 5,
+            "production_files_changed >= 3",
+            metrics.production_files_changed >= 3,
         ),
         ("files_created >= 1", metrics.files_created >= 1),
         ("pagination_reads >= 8", metrics.pagination_reads >= 8),
