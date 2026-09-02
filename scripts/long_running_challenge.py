@@ -333,7 +333,18 @@ The supported severity names are LOW, MEDIUM, HIGH, and CRITICAL. Tests are
 authoritative for public API behavior. The `--min-severity` option accepts
 these names case-insensitively. Unsupported values must be rejected at the CLI
 argument boundary as a CLI usage error with exit status 2, before incident
-processing begins. Do not modify release inputs or tests.
+processing begins.
+
+When `--report` is used, the CLI must emit the same complete v2 report schema
+defined by `incident.report.build_report`. The schema has exactly these
+top-level fields: `schema_version`, `total_received`, `total_actionable`,
+`severity_counts`, and `incidents`. `schema_version` is 2. `severity_counts`
+contains actionable-incident counts for LOW, MEDIUM, HIGH, and CRITICAL, with
+all four keys present even when a count is zero. `incidents` contains the
+serialized actionable incidents in their required output order, using the
+public `id`, `severity`, `timestamp`, and `message` serialization fields.
+
+Do not modify release inputs or tests.
 '''
 
 
@@ -694,9 +705,25 @@ def test_cli_report_flag_outputs_v2_report(tmp_path, capsys):
     input_path = _input_file(tmp_path)
     assert main([str(input_path), "--report"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["schema_version"] == 2
-    assert payload["total_received"] == 2
-    assert payload["total_actionable"] == 1
+    assert payload == {
+        "schema_version": 2,
+        "total_received": 2,
+        "total_actionable": 1,
+        "severity_counts": {
+            "LOW": 0,
+            "MEDIUM": 0,
+            "HIGH": 1,
+            "CRITICAL": 0,
+        },
+        "incidents": [
+            {
+                "id": "high",
+                "severity": "HIGH",
+                "timestamp": 2,
+                "message": "selected",
+            }
+        ],
+    }
 ''',
     }
 

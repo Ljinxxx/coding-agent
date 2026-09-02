@@ -769,9 +769,11 @@ documented public --min-severity contract: supported severity names are accepted
 case-insensitively; unsupported values are rejected at the CLI argument boundary
 as a CLI usage error with exit status 2 before incident processing begins. Keep
 failures within the public interface instead of leaking internal implementation
-exceptions. If this review requires a targeted production edit, make it and
-rerun the fixed pytest command. Do not rescan the repository or reread
-documentation for this review.
+exceptions. The public --report contract requires the complete public v2 report
+schema owned by incident.report.build_report. Do not construct a separate
+reduced report shape in the CLI. If this review requires a targeted production
+edit, make it and rerun the fixed pytest command. Do not rescan the repository
+or reread documentation for this review.
 Phase G - once visible pytest passes and the bounded self-review is complete,
 proceed directly to `python scripts/diagnose.py` and require DIAG_STATE=READY;
 do not read or modify its source. If it returns BLOCKED, make only the targeted

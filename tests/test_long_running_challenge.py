@@ -643,6 +643,116 @@ def test_fixture_public_cli_contract_defines_unsupported_severity_usage_error(
     assert HIDDEN_SERIALIZER_REPORT_CLI_CHECK not in public_fixture
 
 
+def test_public_report_contract_is_consistent_across_public_surfaces() -> None:
+    fixture = build_long_running_fixture(FIXED_TOKENS)
+    readme = " ".join(fixture.files["README.md"].casefold().split())
+    report_test = fixture.files["tests/test_report.py"]
+    cli_test = fixture.files["tests/test_cli.py"]
+    run_4 = " ".join(
+        runner_module.build_run_specs(FIXED_TOKENS)[3]
+        .prompt.casefold()
+        .split()
+    )
+    report_fields = (
+        "schema_version",
+        "total_received",
+        "total_actionable",
+        "severity_counts",
+        "incidents",
+    )
+
+    for phrase in (
+        "--report",
+        "incident.report.build_report",
+        "complete v2 report schema",
+        "exactly these top-level fields",
+        "serialized actionable incidents",
+        "required output order",
+    ):
+        assert phrase in readme
+    for severity in ("low", "medium", "high", "critical"):
+        assert severity in readme
+    for field in report_fields:
+        assert field in readme
+        assert field in report_test
+        assert field in cli_test
+    assert "assert payload == {" in cli_test
+    for phrase in (
+        "complete public v2 report schema",
+        "incident.report.build_report",
+        "separate reduced report shape",
+    ):
+        assert phrase in run_4
+
+
+def test_visible_cli_report_oracle_rejects_reduced_shape_and_accepts_complete_shape(
+    tmp_path: Path,
+) -> None:
+    fixture = build_long_running_fixture(FIXED_TOKENS)
+    workspace = tmp_path / "workspace"
+    materialize_long_running_fixture(fixture, workspace)
+    reference = _reference_solution_files()
+    _write_files(workspace, reference)
+
+    reference_cli = reference["incident/cli.py"]
+    canonical_call = "build_report(received, actionable)"
+    assert reference_cli.count(canonical_call) == 1
+    reduced_expression = (
+        '{"schema_version": 2, '
+        '"total_received": len(received), '
+        '"total_actionable": len(actionable), '
+        '"actionable": ['
+        "serialize_incident(item) for item in actionable]}"
+    )
+    _write_files(
+        workspace,
+        {
+            "incident/cli.py": reference_cli.replace(
+                canonical_call,
+                reduced_expression,
+            )
+        },
+    )
+
+    rejected = run_visible_tests(
+        workspace,
+        basetemp=tmp_path / "reduced-report-pytest",
+    )
+    rejected_output = rejected.stdout + rejected.stderr
+    assert rejected.timed_out is False
+    assert rejected.exit_code not in (None, 0)
+    assert "test_cli_report_flag_outputs_v2_report" in rejected_output
+
+    _write_files(
+        workspace,
+        {"incident/cli.py": reference_cli},
+    )
+    accepted = run_visible_tests(
+        workspace,
+        basetemp=tmp_path / "complete-report-pytest",
+    )
+    assert accepted.passed, accepted.stdout + accepted.stderr
+
+
+def test_public_report_contract_does_not_leak_hidden_concrete_inputs() -> None:
+    fixture = build_long_running_fixture(FIXED_TOKENS)
+    public_surfaces = "\n".join(
+        (
+            fixture.files["README.md"],
+            fixture.files["tests/test_cli.py"],
+            runner_module.build_run_specs(FIXED_TOKENS)[3].prompt,
+        )
+    )
+
+    for hidden_literal in (
+        "hidden-json",
+        "hidden-low",
+        "hidden-cli-low",
+        "hidden-cli-high",
+    ):
+        assert hidden_literal not in public_surfaces
+
+
 def test_run2_prompt_enforces_reconnaissance_phase_boundaries() -> None:
     assert runner_module.CHALLENGE_MAX_STEPS == 40
     assert "max_steps=CHALLENGE_MAX_STEPS" in inspect.getsource(
@@ -784,6 +894,10 @@ def test_run4_prompt_requires_generic_public_boundary_self_review() -> None:
         "public interface",
         "internal implementation exceptions",
         "one bounded public-contract self-review",
+        "public --report contract",
+        "complete public v2 report schema",
+        "incident.report.build_report",
+        "separate reduced report shape",
     ):
         assert phrase in run_4
 
