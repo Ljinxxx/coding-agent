@@ -15,13 +15,23 @@ from src.context_compaction import (
 )
 from src.progress_guard import ProgressGuardConfig
 from src.tools.base import BaseTool
-from src.tools.files import ListDirectoryTool, ReadFileTool, WriteFileTool
+from src.tools.files import (
+    EditFileTool,
+    ListDirectoryTool,
+    ReadFileTool,
+    WriteFileTool,
+)
 from src.tools.registry import ToolRegistry
 
 
 TRACKED_COMMAND = "python -B -m pytest -q --basetemp=.pytest_tmp"
 OTHER_COMMAND = "python -B diagnose.py"
 EXECUTION_BUDGET_HEADER = "[Execution Budget]"
+REPAIR_SURFACE_PATHS = (
+    "incident/store.py",
+    "incident/serializer.py",
+    "incident/report.py",
+)
 
 
 class RecordingLLM:
@@ -156,6 +166,7 @@ def guard_config(
     mutation_tool_names: tuple[str, ...] = ("edit_file", "write_file"),
     initial_pending_command: str | None = None,
     initial_diagnosis_responses: int = 0,
+    allowed_mutation_paths: tuple[str, ...] | None = None,
 ) -> ProgressGuardConfig:
     return ProgressGuardConfig(
         tracked_commands=tracked_commands,
@@ -163,6 +174,7 @@ def guard_config(
         diagnosis_responses=diagnosis_responses,
         initial_pending_command=initial_pending_command,
         initial_diagnosis_responses=initial_diagnosis_responses,
+        allowed_mutation_paths=allowed_mutation_paths,
     )
 
 
@@ -245,6 +257,10 @@ def test_progress_guard_config_rejects_simple_invalid_values() -> None:
         guard_config(initial_diagnosis_responses=-1)
     with pytest.raises(ValueError, match="initial_diagnosis_responses"):
         guard_config(initial_diagnosis_responses=1)
+    with pytest.raises(ValueError, match="allowed_mutation_paths"):
+        guard_config(allowed_mutation_paths=["source.py"])  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="allowed_mutation_paths"):
+        guard_config(allowed_mutation_paths=("",))
 
 
 def test_one_diagnosis_response_allows_multiple_reads_then_blocks_broad_tools(
@@ -1343,3 +1359,346 @@ def test_real_write_progress_allows_exact_retest(
         "content"
     ].startswith("File written successfully:")
     assert result_payload(agent.history, "allowed-retest")["exit_code"] == 0
+
+
+@pytest.mark.parametrize(
+    "requested_path",
+    (
+        "incident/store.py",
+        "./incident/store.py",
+        "incident/../incident/store.py",
+        r"incident\store.py",
+    ),
+)
+def test_repair_surface_allows_canonicalized_declared_mutation_paths(
+    tmp_path: Path,
+    requested_path: str,
+) -> None:
+    incident = tmp_path / "incident"
+    incident.mkdir()
+    store = incident / "store.py"
+    store.write_text("old", encoding="utf-8")
+    llm = RecordingLLM(
+        [
+            tool_response(
+                (
+                    "allowed-write",
+                    "write_file",
+                    {"path": requested_path, "content": "new"},
+                )
+            ),
+            text_response("surface-complete"),
+        ]
+    )
+    agent = Agent(
+        llm,
+        registry_with(WriteFileTool(tmp_path)),
+        max_steps=2,
+    )
+
+    assert agent.run(
+        "Modify one declared repair target.",
+        require_verified_completion=False,
+        progress_guard=guard_config(
+            mutation_tool_names=("write_file",),
+            allowed_mutation_paths=REPAIR_SURFACE_PATHS,
+        ),
+    ) == "surface-complete"
+
+    assert store.read_text(encoding="utf-8") == "new"
+    assert agent.workspace_revision == 1
+    assert result_message(agent.history, "allowed-write")["content"].startswith(
+        "File written successfully:"
+    )
+
+
+@pytest.mark.parametrize(
+    "configured_path",
+    ("../outside.py", "ABSOLUTE_WORKSPACE_PATH"),
+)
+def test_repair_surface_configuration_requires_workspace_relative_paths(
+    tmp_path: Path,
+    configured_path: str,
+) -> None:
+    if configured_path == "ABSOLUTE_WORKSPACE_PATH":
+        configured_path = str((tmp_path / "inside.py").resolve())
+    agent = Agent(
+        RecordingLLM([text_response("unused")]),
+        registry_with(WriteFileTool(tmp_path)),
+    )
+
+    with pytest.raises(ValueError, match="allowed_mutation_paths"):
+        agent.run(
+            "Reject an invalid repair surface.",
+            progress_guard=guard_config(
+                mutation_tool_names=("write_file",),
+                allowed_mutation_paths=(configured_path,),
+            ),
+        )
+
+    assert agent.history == []
+    assert agent.workspace_revision == 0
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "requested_path", "protected_path", "target_exists"),
+    (
+        ("write_file", "incident/parser.py", "incident/parser.py", True),
+        ("write_file", "./incident/parser.py", "incident/parser.py", True),
+        ("write_file", "incident/contract.py", "incident/contract.py", False),
+        ("edit_file", "incident/cli.py", "incident/cli.py", True),
+        (
+            "write_file",
+            "incident/../incident/parser.py",
+            "incident/parser.py",
+            True,
+        ),
+        ("write_file", r"incident\parser.py", "incident/parser.py", True),
+        ("write_file", "incident/models.py", "incident/models.py", True),
+        ("write_file", "incident/service.py", "incident/service.py", True),
+        ("write_file", "incident/constants.py", "incident/constants.py", True),
+    ),
+)
+def test_repair_surface_blocks_out_of_scope_existing_new_and_aliased_paths(
+    tmp_path: Path,
+    tool_name: str,
+    requested_path: str,
+    protected_path: str,
+    target_exists: bool,
+) -> None:
+    incident = tmp_path / "incident"
+    incident.mkdir()
+    for name in ("parser.py", "cli.py", "models.py", "service.py", "constants.py"):
+        (incident / name).write_text("original", encoding="utf-8")
+    arguments = (
+        {
+            "path": requested_path,
+            "old_text": "original",
+            "new_text": "changed",
+        }
+        if tool_name == "edit_file"
+        else {"path": requested_path, "content": "changed"}
+    )
+    llm = RecordingLLM(
+        [
+            tool_response(("blocked-mutation", tool_name, arguments)),
+            text_response("surface-blocked"),
+        ]
+    )
+    agent = Agent(
+        llm,
+        registry_with(EditFileTool(tmp_path), WriteFileTool(tmp_path)),
+        max_steps=2,
+    )
+
+    assert agent.run(
+        "Reject a mutation outside the declared repair surface.",
+        require_verified_completion=False,
+        progress_guard=guard_config(
+            allowed_mutation_paths=REPAIR_SURFACE_PATHS,
+        ),
+    ) == "surface-blocked"
+
+    protected = tmp_path / protected_path
+    assert protected.exists() is target_exists
+    if target_exists:
+        assert protected.read_text(encoding="utf-8") == "original"
+    assert not (tmp_path / "incident/contract.py").exists()
+    assert agent.workspace_revision == 0
+    assert agent.verified_revision == 0
+    assert agent.verification_required is False
+    payload = result_payload(agent.history, "blocked-mutation")
+    assert payload["ok"] is False
+    assert payload["error_type"] == "ProgressGuardBlocked"
+    assert payload["policy_blocked"] is True
+    assert all(path in payload["message"] for path in REPAIR_SURFACE_PATHS)
+    assert sum(
+        message.get("tool_call_id") == "blocked-mutation"
+        for message in tool_messages(agent.history)
+    ) == 1
+
+
+def test_repair_surface_keeps_allowed_blocked_allowed_siblings_independent(
+    tmp_path: Path,
+) -> None:
+    incident = tmp_path / "incident"
+    incident.mkdir()
+    parser = incident / "parser.py"
+    parser.write_text("protected", encoding="utf-8")
+    llm = RecordingLLM(
+        [
+            tool_response(
+                (
+                    "allowed-store",
+                    "write_file",
+                    {"path": "incident/store.py", "content": "store"},
+                ),
+                (
+                    "blocked-parser",
+                    "write_file",
+                    {"path": "incident/parser.py", "content": "parser"},
+                ),
+                (
+                    "allowed-report",
+                    "write_file",
+                    {"path": "incident/report.py", "content": "report"},
+                ),
+            ),
+            text_response("siblings-complete"),
+        ]
+    )
+    agent = Agent(
+        llm,
+        registry_with(WriteFileTool(tmp_path)),
+        max_steps=2,
+    )
+
+    assert agent.run(
+        "Execute independent sibling mutations.",
+        require_verified_completion=False,
+        progress_guard=guard_config(
+            mutation_tool_names=("write_file",),
+            allowed_mutation_paths=REPAIR_SURFACE_PATHS,
+        ),
+    ) == "siblings-complete"
+
+    assert (incident / "store.py").read_text(encoding="utf-8") == "store"
+    assert parser.read_text(encoding="utf-8") == "protected"
+    assert (incident / "report.py").read_text(encoding="utf-8") == "report"
+    assert agent.workspace_revision == 2
+    assert [
+        message["tool_call_id"] for message in tool_messages(agent.history)
+    ] == ["allowed-store", "blocked-parser", "allowed-report"]
+    assert result_payload(agent.history, "blocked-parser")["error_type"] == (
+        "ProgressGuardBlocked"
+    )
+
+
+def test_repair_surface_blocks_real_contract_and_late_rewrite_pattern(
+    tmp_path: Path,
+) -> None:
+    incident = tmp_path / "incident"
+    incident.mkdir()
+    protected_names = ("models.py", "parser.py", "cli.py")
+    for name in protected_names:
+        (incident / name).write_text(f"protected-{name}", encoding="utf-8")
+    (incident / "context.py").write_text("context", encoding="utf-8")
+    command = ScriptedCommandTool([CommandOutcome(0)])
+    llm = RecordingLLM(
+        [
+            tool_response(
+                ("initial-diagnosis", "read_file", {"path": "incident/context.py"})
+            ),
+            tool_response(
+                (
+                    "blocked-contract",
+                    "write_file",
+                    {"path": "incident/contract.py", "content": "invented"},
+                ),
+                (
+                    "blocked-retest-before-repair",
+                    "run_command",
+                    {"command": TRACKED_COMMAND},
+                ),
+            ),
+            tool_response(
+                (
+                    "repair-store",
+                    "write_file",
+                    {"path": "incident/store.py", "content": "store-fixed"},
+                )
+            ),
+            tool_response(
+                ("focused-retest", "run_command", {"command": TRACKED_COMMAND})
+            ),
+            tool_response(
+                (
+                    "late-models",
+                    "write_file",
+                    {"path": "incident/models.py", "content": "bad-models"},
+                ),
+                (
+                    "late-parser",
+                    "write_file",
+                    {"path": "incident/parser.py", "content": "bad-parser"},
+                ),
+                (
+                    "late-serializer",
+                    "write_file",
+                    {
+                        "path": "incident/serializer.py",
+                        "content": "serializer-fixed",
+                    },
+                ),
+                (
+                    "late-report",
+                    "write_file",
+                    {"path": "incident/report.py", "content": "report-fixed"},
+                ),
+                (
+                    "late-cli",
+                    "write_file",
+                    {"path": "incident/cli.py", "content": "bad-cli"},
+                ),
+            ),
+            text_response("repair-pattern-complete"),
+        ]
+    )
+    agent = Agent(
+        llm,
+        registry_with(command, ReadFileTool(tmp_path), WriteFileTool(tmp_path)),
+        max_steps=6,
+    )
+
+    assert agent.run(
+        "Recover from the recorded failure without expanding repair scope.",
+        require_verified_completion=False,
+        progress_guard=guard_config(
+            mutation_tool_names=("write_file",),
+            diagnosis_responses=2,
+            initial_pending_command=TRACKED_COMMAND,
+            initial_diagnosis_responses=3,
+            allowed_mutation_paths=REPAIR_SURFACE_PATHS,
+        ),
+    ) == "repair-pattern-complete"
+
+    assert command.calls == [TRACKED_COMMAND]
+    assert result_message(agent.history, "initial-diagnosis")[
+        "content"
+    ].startswith("[read_file]")
+    assert not (incident / "contract.py").exists()
+    for name in protected_names:
+        assert (incident / name).read_text(encoding="utf-8") == (
+            f"protected-{name}"
+        )
+    assert (incident / "store.py").read_text(encoding="utf-8") == "store-fixed"
+    assert (incident / "serializer.py").read_text(encoding="utf-8") == (
+        "serializer-fixed"
+    )
+    assert (incident / "report.py").read_text(encoding="utf-8") == (
+        "report-fixed"
+    )
+    for call_id in (
+        "blocked-contract",
+        "blocked-retest-before-repair",
+        "late-models",
+        "late-parser",
+        "late-cli",
+    ):
+        assert result_payload(agent.history, call_id)["error_type"] == (
+            "ProgressGuardBlocked"
+        )
+    assert agent.workspace_revision == 4
+    assert agent.verification_required is True
+    step39_ids = (
+        "late-models",
+        "late-parser",
+        "late-serializer",
+        "late-report",
+        "late-cli",
+    )
+    for call_id in step39_ids:
+        assert sum(
+            message.get("tool_call_id") == call_id
+            for message in tool_messages(agent.history)
+        ) == 1

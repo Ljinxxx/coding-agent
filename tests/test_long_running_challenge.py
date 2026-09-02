@@ -61,6 +61,7 @@ EXPECTED_INITIAL_FILES = {
     "incident/store.py",
     "incident/service.py",
     "incident/serializer.py",
+    "incident/report.py",
     "incident/cli.py",
     "scripts/diagnose.py",
     "tests/test_parser.py",
@@ -69,6 +70,7 @@ EXPECTED_INITIAL_FILES = {
     "tests/test_serializer.py",
     "tests/test_report.py",
     "tests/test_cli.py",
+    "tests/test_release_repair.py",
 }
 
 EXPECTED_PROTECTED_FILES = {
@@ -81,6 +83,7 @@ EXPECTED_PROTECTED_FILES = {
     "tests/test_serializer.py",
     "tests/test_report.py",
     "tests/test_cli.py",
+    "tests/test_release_repair.py",
 }
 
 FIXED_TOKENS = ChallengeTokens(
@@ -303,6 +306,16 @@ def _reference_solution_files() -> dict[str, str]:
     }
 
 
+def _reference_repair_files() -> dict[str, str]:
+    solution = _reference_solution_files()
+    repair_paths = (
+        "incident/store.py",
+        "incident/serializer.py",
+        "incident/report.py",
+    )
+    return {path: solution[path] for path in repair_paths}
+
+
 def _minimum_coverage_metrics() -> LongRunningMetrics:
     return LongRunningMetrics(
         agent_runs=4,
@@ -343,7 +356,8 @@ def _passing_functional_metrics() -> FunctionalChallengeMetrics:
         release_token_recovered=True,
         migration_key_recovered=True,
         diag_tail_token_recovered=True,
-        report_module_created=True,
+        report_module_present=True,
+        report_module_implemented=True,
     )
 
 
@@ -433,7 +447,7 @@ def _run4_pytest_exchange(
         call_id,
         "run_command",
         {
-            "command": command or runner_module.CHALLENGE_PYTEST_COMMAND,
+            "command": command or runner_module.CHALLENGE_REPAIR_PYTEST_COMMAND,
         },
         json.dumps(
             {
@@ -484,7 +498,7 @@ def _analyze_run4_history(
         seeded_run4 = runner_module.seed_run_progress_guard(
             run_specs[3],
             runner_module.PendingTrackedFailure(
-                runner_module.CHALLENGE_PYTEST_COMMAND
+                runner_module.CHALLENGE_REPAIR_PYTEST_COMMAND
             ),
             initial_diagnosis_responses=3,
         )
@@ -547,7 +561,7 @@ def test_fixture_materialization_is_deterministic_and_isolated(
     run4_progress_guard = run_specs[3].progress_guard
     assert run4_progress_guard is not None
     assert run4_progress_guard.tracked_commands == (
-        runner_module.CHALLENGE_PYTEST_COMMAND,
+        runner_module.CHALLENGE_REPAIR_PYTEST_COMMAND,
     )
     assert run4_progress_guard.mutation_tool_names == (
         "edit_file",
@@ -647,10 +661,10 @@ def test_run3_failure_handoff_seeds_the_runtime_run4_guard() -> None:
         history,
         [record],
         run_index=3,
-        tracked_commands=(runner_module.CHALLENGE_PYTEST_COMMAND,),
+        tracked_commands=(runner_module.CHALLENGE_REPAIR_PYTEST_COMMAND,),
     )
     assert failure == runner_module.PendingTrackedFailure(
-        runner_module.CHALLENGE_PYTEST_COMMAND
+        runner_module.CHALLENGE_REPAIR_PYTEST_COMMAND
     )
 
     run4 = runner_module.seed_run_progress_guard(
@@ -660,7 +674,7 @@ def test_run3_failure_handoff_seeds_the_runtime_run4_guard() -> None:
     )
     assert run4.progress_guard is not None
     assert run4.progress_guard.initial_pending_command == (
-        runner_module.CHALLENGE_PYTEST_COMMAND
+        runner_module.CHALLENGE_REPAIR_PYTEST_COMMAND
     )
     assert run4.progress_guard.initial_diagnosis_responses == 3
     assert run4.progress_guard.diagnosis_responses == 2
@@ -689,7 +703,7 @@ def test_run3_handoff_rejects_pass_timeout_and_wrong_command_results() -> None:
             history,
             [record],
             run_index=3,
-            tracked_commands=(runner_module.CHALLENGE_PYTEST_COMMAND,),
+            tracked_commands=(runner_module.CHALLENGE_REPAIR_PYTEST_COMMAND,),
         ) is None
 
 
@@ -877,6 +891,7 @@ def test_public_report_contract_does_not_leak_hidden_concrete_inputs() -> None:
         (
             fixture.files["README.md"],
             fixture.files["tests/test_cli.py"],
+            fixture.files["tests/test_release_repair.py"],
             runner_module.build_run_specs(FIXED_TOKENS)[3].prompt,
         )
     )
@@ -952,7 +967,7 @@ def test_run3_prompt_requires_exact_sequential_pagination() -> None:
         "use only read_file and its continuation metadata",
         "phase a - sequential migration read",
         "phase h - checkpoint",
-        runner_module.CHALLENGE_PYTEST_COMMAND.casefold(),
+        runner_module.CHALLENGE_REPAIR_PYTEST_COMMAND.casefold(),
         "run exactly `python scripts/diagnose.py`",
         "do not read or modify scripts/diagnose.py",
         "do not repair production files",
@@ -994,7 +1009,7 @@ def test_run4_prompt_enforces_execution_phase_and_action_deadline() -> None:
         "do not reread an unchanged complete file",
         "after that same file was modified",
         "concrete new test failure",
-        runner_module.CHALLENGE_PYTEST_COMMAND.casefold(),
+        runner_module.CHALLENGE_REPAIR_PYTEST_COMMAND.casefold(),
         "diag_state=ready",
         "call verify_workspace",
     )
@@ -1090,7 +1105,7 @@ def test_run4_prompt_requires_direct_terminal_transitions() -> None:
     )
 
     for transition in (
-        "visible pytest pass -> diagnostic",
+        "focused repair pytest pass -> diagnostic",
         (
             "diag_state=blocked -> targeted production repair -> fixed pytest "
             "-> diagnostic"
@@ -1152,23 +1167,35 @@ def test_run4_prompt_forbids_migration_reinspection_and_uses_history() -> None:
         assert phrase in run_4
 
 
-def test_challenge_pytest_command_is_windows_safe_and_consistent() -> None:
+def test_full_and_focused_pytest_commands_are_windows_safe_and_consistent() -> None:
     assert runner_module.CHALLENGE_PYTEST_COMMAND == (
         "python -B -m pytest -q --basetemp=.pytest_tmp"
     )
+    assert runner_module.CHALLENGE_REPAIR_PYTEST_COMMAND == (
+        "python -B -m pytest tests/test_release_repair.py -q "
+        "--basetemp=.pytest_tmp"
+    )
     run_specs = runner_module.build_run_specs(FIXED_TOKENS)
-    assert runner_module.CHALLENGE_PYTEST_COMMAND in run_specs[2].prompt
-    assert runner_module.CHALLENGE_PYTEST_COMMAND in run_specs[3].prompt
-    trusted_command = runner_module.make_command(
+    assert runner_module.CHALLENGE_REPAIR_PYTEST_COMMAND in run_specs[2].prompt
+    assert runner_module.CHALLENGE_REPAIR_PYTEST_COMMAND in run_specs[3].prompt
+    trusted_full_command = runner_module.make_command(
         "python",
         *runner_module.CHALLENGE_PYTEST_ARGUMENTS,
     )
-    assert runner_module._is_challenge_pytest_command(trusted_command)
+    trusted_repair_command = runner_module.make_command(
+        "python",
+        *runner_module.CHALLENGE_REPAIR_PYTEST_ARGUMENTS,
+    )
+    assert runner_module._is_challenge_pytest_command(trusted_full_command)
+    assert runner_module._is_challenge_repair_pytest_command(
+        trusted_repair_command
+    )
     assert not runner_module._is_challenge_pytest_command(
         "python -B -m pytest -q"
     )
-    assert not runner_module._is_challenge_pytest_command(
-        runner_module.CHALLENGE_PYTEST_COMMAND + " && echo repeated"
+    assert not runner_module._is_challenge_repair_pytest_command(
+        runner_module.CHALLENGE_REPAIR_PYTEST_COMMAND
+        + " && echo repeated"
     )
     assert "*CHALLENGE_PYTEST_ARGUMENTS" in inspect.getsource(
         runner_module.execute_real_challenge
@@ -1203,9 +1230,10 @@ def test_fixture_contains_required_long_running_repository_structure(
         if path.is_file()
     }
     assert actual_files == EXPECTED_INITIAL_FILES
-    assert len(actual_files) == 21
+    assert len(actual_files) == 23
     assert len(actual_files) >= 18
-    assert "incident/report.py" not in actual_files
+    assert "incident/report.py" in actual_files
+    assert "tests/test_release_repair.py" in actual_files
     assert set(fixture.protected_files) == EXPECTED_PROTECTED_FILES
 
     visible_test_items = sum(
@@ -1213,7 +1241,7 @@ def test_fixture_contains_required_long_running_repository_structure(
         for name, content in fixture.files.items()
         if name.startswith("tests/test_")
     )
-    assert visible_test_items == 26
+    assert visible_test_items == 34
 
     initial = run_visible_tests(
         workspace,
@@ -1227,7 +1255,8 @@ def test_fixture_contains_required_long_running_repository_structure(
         initial_output,
     )
     assert summary is not None, initial_output
-    assert 5 <= int(summary.group("failed")) <= 12
+    assert int(summary.group("failed")) > 0
+    assert int(summary.group("passed")) > int(summary.group("failed"))
 
     failed_nodes = re.findall(
         r"FAILED (tests/test_[^:]+\.py)::([^\s]+)",
@@ -1236,12 +1265,13 @@ def test_fixture_contains_required_long_running_repository_structure(
     failed_modules = {path for path, _ in failed_nodes}
     assert failed_modules == {
         "tests/test_store.py",
-        "tests/test_service.py",
         "tests/test_serializer.py",
         "tests/test_report.py",
         "tests/test_cli.py",
+        "tests/test_release_repair.py",
     }
     assert all(path != "tests/test_parser.py" for path, _ in failed_nodes)
+    assert all(path != "tests/test_service.py" for path, _ in failed_nodes)
     base_cli_nodes = {
         "test_cli_outputs_default_json_list",
         "test_cli_accepts_lowercase_minimum_severity",
@@ -1254,13 +1284,15 @@ def test_fixture_contains_required_long_running_repository_structure(
     )
 
 
-def test_reduced_fixture_parser_and_base_cli_start_correct(
+def test_stabilized_fixture_initial_modules_and_report_stub_contract(
     tmp_path: Path,
 ) -> None:
     fixture = build_long_running_fixture(FIXED_TOKENS)
     workspace = tmp_path / "workspace"
     materialize_long_running_fixture(fixture, workspace)
-    assert not (workspace / "incident/report.py").exists()
+    assert (workspace / "incident/report.py").is_file()
+    assert not (workspace / "incident/contract.py").exists()
+    assert not (workspace / "incident/policy.py").exists()
 
     selected = runner_module.run_host_process(
         [
@@ -1270,6 +1302,7 @@ def test_reduced_fixture_parser_and_base_cli_start_correct(
             "pytest",
             "-q",
             "tests/test_parser.py",
+            "tests/test_service.py",
             "tests/test_cli.py::test_cli_outputs_default_json_list",
             "tests/test_cli.py::test_cli_accepts_lowercase_minimum_severity",
             (
@@ -1306,6 +1339,159 @@ def test_reduced_fixture_parser_and_base_cli_start_correct(
     payload = json.loads(module_cli.stdout)
     assert isinstance(payload, list) and payload
     assert all("id" in item for item in payload)
+
+    report_signature = runner_module.run_host_process(
+        [
+            sys.executable,
+            "-B",
+            "-c",
+            (
+                "import inspect; "
+                "from incident.report import build_report; "
+                "print(inspect.signature(build_report))"
+            ),
+        ],
+        workspace,
+        timeout=10,
+    )
+    assert report_signature.passed, (
+        report_signature.stdout + report_signature.stderr
+    )
+    assert report_signature.stdout.strip() == "(received, actionable)"
+
+    report_stub = runner_module.run_host_process(
+        [
+            sys.executable,
+            "-B",
+            "-c",
+            (
+                "from incident.report import build_report; "
+                "\ntry: build_report([], [])"
+                "\nexcept NotImplementedError as error:"
+                "\n assert str(error) == "
+                "'v2 report contract not implemented'"
+                "\nelse: raise AssertionError('stub must be incomplete')"
+            ),
+        ],
+        workspace,
+        timeout=10,
+    )
+    assert report_stub.passed, report_stub.stdout + report_stub.stderr
+
+
+def test_focused_repair_suite_is_canonical_small_and_initially_failing(
+    tmp_path: Path,
+) -> None:
+    fixture = build_long_running_fixture(FIXED_TOKENS)
+    focused_source = fixture.files["tests/test_release_repair.py"]
+    focused_test_count = len(
+        re.findall(r"^def test_", focused_source, flags=re.MULTILINE)
+    )
+    assert 7 <= focused_test_count <= 9
+    for initial_correct_module in (
+        "incident.parser",
+        "incident.service",
+        "incident.cli",
+        "incident.constants",
+    ):
+        assert initial_correct_module not in focused_source
+
+    expected_arguments = (
+        "-B",
+        "-m",
+        "pytest",
+        "tests/test_release_repair.py",
+        "-q",
+        "--basetemp=.pytest_tmp",
+    )
+    assert runner_module.CHALLENGE_REPAIR_PYTEST_ARGUMENTS == expected_arguments
+    assert runner_module.CHALLENGE_REPAIR_PYTEST_COMMAND == (
+        "python " + " ".join(expected_arguments)
+    )
+
+    workspace = tmp_path / "workspace"
+    materialize_long_running_fixture(fixture, workspace)
+    focused = runner_module.run_host_process(
+        [sys.executable, *runner_module.CHALLENGE_REPAIR_PYTEST_ARGUMENTS],
+        workspace,
+        timeout=30,
+    )
+    output = focused.stdout + focused.stderr
+    assert focused.timed_out is False
+    assert focused.exit_code not in (None, 0)
+    summary = re.search(
+        r"(?P<failed>\d+) failed(?:, (?P<passed>\d+) passed)?",
+        output,
+    )
+    assert summary is not None, output
+    assert 5 <= int(summary.group("failed")) <= 9
+    assert "NotImplementedError" in output
+    assert "test_store_" in output
+    assert "test_serializer_" in output
+    assert "test_report_" in output
+
+
+def test_three_file_reference_repair_passes_focused_full_and_hidden(
+    tmp_path: Path,
+) -> None:
+    fixture = build_long_running_fixture(FIXED_TOKENS)
+    workspace = tmp_path / "workspace"
+    materialize_long_running_fixture(fixture, workspace)
+    before = snapshot_workspace(workspace)
+
+    initial_focused = runner_module.run_host_process(
+        [sys.executable, *runner_module.CHALLENGE_REPAIR_PYTEST_ARGUMENTS],
+        workspace,
+        timeout=30,
+    )
+    assert initial_focused.exit_code not in (None, 0)
+
+    repair = _reference_repair_files()
+    assert set(repair) == {
+        "incident/store.py",
+        "incident/serializer.py",
+        "incident/report.py",
+    }
+    _write_files(workspace, repair)
+    after = snapshot_workspace(workspace)
+    changed_paths = {
+        path
+        for path in before.keys() | after.keys()
+        if before.get(path) != after.get(path)
+    }
+    assert changed_paths == set(repair)
+    assert all(path in before for path in repair)
+
+    focused = runner_module.run_host_process(
+        [sys.executable, *runner_module.CHALLENGE_REPAIR_PYTEST_ARGUMENTS],
+        workspace,
+        timeout=30,
+    )
+    assert focused.passed, focused.stdout + focused.stderr
+
+    full = run_visible_tests(
+        workspace,
+        basetemp=tmp_path / "reference-full-pytest",
+    )
+    assert full.passed, full.stdout + full.stderr
+
+    for hidden_code in (
+        HIDDEN_PARSER_CHECK,
+        HIDDEN_STORE_SERVICE_CHECK,
+        HIDDEN_SERIALIZER_REPORT_CLI_CHECK,
+    ):
+        hidden = run_hidden_code(workspace, hidden_code)
+        assert hidden.passed, hidden.stdout + hidden.stderr
+
+    assert protected_files_unchanged(fixture, before, after)
+    for initial_correct_path in (
+        "incident/constants.py",
+        "incident/models.py",
+        "incident/parser.py",
+        "incident/service.py",
+        "incident/cli.py",
+    ):
+        assert before[initial_correct_path] == after[initial_correct_path]
 
 
 def test_migration_notes_place_directives_across_late_pages() -> None:
@@ -1512,6 +1698,9 @@ def test_hidden_report_and_cli_checks_cover_release_contract(
 def test_long_running_coverage_requires_all_minimum_metrics() -> None:
     minimum = _minimum_coverage_metrics()
     assert evaluate_long_running_coverage(minimum).passed is True
+    assert evaluate_long_running_coverage(
+        replace(minimum, files_created=0)
+    ).passed is True
 
     below_minimum = {
         "agent_runs": 3,
@@ -1519,7 +1708,6 @@ def test_long_running_coverage_requires_all_minimum_metrics() -> None:
         "tool_calls": 29,
         "distinct_files_read": 9,
         "production_files_changed": 2,
-        "files_created": 0,
         "pagination_reads": 7,
         "compaction_bearing_requests": 2,
         "controlled_errors_observed": 1,
@@ -2503,7 +2691,7 @@ def test_run4_pytest_repair_loop_ignores_nonfailures_and_nonfixed_commands(
         *_tool_exchange(
             "pytest-malformed-result",
             "run_command",
-            {"command": runner_module.CHALLENGE_PYTEST_COMMAND},
+            {"command": runner_module.CHALLENGE_REPAIR_PYTEST_COMMAND},
             "not-json",
         ),
         *_run4_pytest_exchange("pytest-after-malformed", exit_code=0),
@@ -3227,6 +3415,8 @@ def test_report_serialization_contains_required_evidence_fields(
         "controlled_errors_recovered",
         "shell_truncation_observed",
         "verification_calls",
+        "report_module_present",
+        "report_module_implemented",
         "long_running_coverage_passed",
         "functional_challenge_passed",
         "final_integrated_success",
@@ -3239,6 +3429,8 @@ def test_report_serialization_contains_required_evidence_fields(
     assert report["long_running_coverage_passed"] is True
     assert report["functional_challenge_passed"] is True
     assert report["final_integrated_success"] is True
+    assert report["report_module_present"] is True
+    assert report["report_module_implemented"] is True
     assert "messages" not in report["llm_call_metrics"][0]
 
     serialized = json.dumps(report, sort_keys=True)

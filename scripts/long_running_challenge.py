@@ -35,6 +35,7 @@ PROTECTED_FILES = (
     "tests/test_serializer.py",
     "tests/test_report.py",
     "tests/test_cli.py",
+    "tests/test_release_repair.py",
 )
 
 DIAG_MIDDLE_SENTINEL = "diagnostic-middle-record-not-in-bounded-output"
@@ -363,7 +364,7 @@ def _architecture_doc() -> str:
 - `incident.store` owns canonical incident replacement.
 - `incident.service` selects and orders actionable incidents.
 - `incident.serializer` exposes the stable JSON shape.
-- `incident.report` owns the v2 aggregate report and may need to be created.
+- `incident.report` owns the v2 aggregate report implementation.
 - `incident.cli` connects parsing, selection, serialization, and reporting.
 
 Deployment defaults are documented at `../shared/global_defaults.json`.
@@ -446,13 +447,33 @@ def parse_incident(line: str) -> Incident:
 
 
 def select_actionable(incidents, min_severity):
-    threshold = SEVERITY_ORDER[min_severity]
+    threshold = str(min_severity).strip().upper()
+    if threshold not in SEVERITY_ORDER:
+        raise ValueError(f"unknown severity: {min_severity}")
+
+    canonical = {}
+    for incident in list(incidents):
+        current = canonical.get(incident.incident_id)
+        if current is None:
+            canonical[incident.incident_id] = incident
+            continue
+        new_rank = SEVERITY_ORDER[incident.severity]
+        current_rank = SEVERITY_ORDER[current.severity]
+        if new_rank > current_rank or (
+            new_rank == current_rank
+            and incident.timestamp >= current.timestamp
+        ):
+            canonical[incident.incident_id] = incident
+
     selected = [
         incident
-        for incident in incidents
-        if SEVERITY_ORDER[incident.severity] >= threshold
+        for incident in canonical.values()
+        if SEVERITY_ORDER[incident.severity] >= SEVERITY_ORDER[threshold]
     ]
-    return sorted(selected, key=lambda item: item.incident_id)
+    return sorted(
+        selected,
+        key=lambda item: (item.timestamp, item.incident_id),
+    )
 ''',
         "incident/serializer.py": '''def serialize_incident(incident):
     return {
@@ -461,6 +482,9 @@ def select_actionable(incidents, min_severity):
         "timestamp": str(incident.timestamp),
         "message": incident.message,
     }
+''',
+        "incident/report.py": '''def build_report(received, actionable):
+    raise NotImplementedError("v2 report contract not implemented")
 ''',
         "incident/cli.py": '''import argparse
 import json
@@ -802,6 +826,105 @@ def test_cli_module_report_outputs_complete_v2_payload(tmp_path):
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert json.loads(completed.stdout) == _expected_report_payload()
+''',
+        "tests/test_release_repair.py": '''import inspect
+
+from incident.models import Incident
+from incident.report import build_report
+from incident.serializer import serialize_incident
+from incident.store import IncidentStore
+
+
+def test_store_public_api_inserts_and_exposes_values():
+    store = IncidentStore()
+    incident = Incident("focus-api", "LOW", 1, "created")
+    assert store.upsert(incident) is True
+    assert store.get("focus-api") == incident
+    assert store.values() == [incident]
+
+
+def test_store_keeps_highest_severity_regardless_of_arrival_order():
+    store = IncidentStore()
+    store.upsert(Incident("focus-severity", "CRITICAL", 10, "highest"))
+    store.upsert(Incident("focus-severity", "MEDIUM", 99, "later lower"))
+    assert store.get("focus-severity").message == "highest"
+
+
+def test_store_uses_latest_timestamp_for_equal_severity():
+    store = IncidentStore()
+    store.upsert(Incident("focus-time", "HIGH", 20, "current"))
+    store.upsert(Incident("focus-time", "HIGH", 19, "older"))
+    assert store.get("focus-time").message == "current"
+    store.upsert(Incident("focus-time", "HIGH", 21, "newer"))
+    assert store.get("focus-time").message == "newer"
+
+
+def test_serializer_returns_exact_public_primitive_schema():
+    incident = Incident("focus-json", "HIGH", 7, "stable")
+    assert serialize_incident(incident) == {
+        "id": "focus-json",
+        "severity": "HIGH",
+        "timestamp": 7,
+        "message": "stable",
+    }
+
+
+def test_report_returns_exact_v2_schema_and_totals():
+    assert str(inspect.signature(build_report)) == "(received, actionable)"
+    incident = Incident("focus-report", "HIGH", 8, "actionable")
+    assert build_report([incident], [incident]) == {
+        "schema_version": 2,
+        "total_received": 1,
+        "total_actionable": 1,
+        "severity_counts": {
+            "LOW": 0,
+            "MEDIUM": 0,
+            "HIGH": 1,
+            "CRITICAL": 0,
+        },
+        "incidents": [serialize_incident(incident)],
+    }
+
+
+def test_report_counts_only_actionable_severities_with_all_keys():
+    received = [
+        Incident("focus-low", "LOW", 1, "ignored"),
+        Incident("focus-critical", "CRITICAL", 2, "selected"),
+    ]
+    report = build_report(received, [received[1]])
+    assert report["severity_counts"] == {
+        "LOW": 0,
+        "MEDIUM": 0,
+        "HIGH": 0,
+        "CRITICAL": 1,
+    }
+
+
+def test_report_handles_empty_inputs_with_exact_schema():
+    assert build_report([], []) == {
+        "schema_version": 2,
+        "total_received": 0,
+        "total_actionable": 0,
+        "severity_counts": {
+            "LOW": 0,
+            "MEDIUM": 0,
+            "HIGH": 0,
+            "CRITICAL": 0,
+        },
+        "incidents": [],
+    }
+
+
+def test_report_preserves_given_actionable_order():
+    actionable = [
+        Incident("focus-second", "HIGH", 20, "second"),
+        Incident("focus-first", "MEDIUM", 10, "first"),
+    ]
+    report = build_report(list(reversed(actionable)), actionable)
+    assert [item["id"] for item in report["incidents"]] == [
+        "focus-second",
+        "focus-first",
+    ]
 ''',
     }
 

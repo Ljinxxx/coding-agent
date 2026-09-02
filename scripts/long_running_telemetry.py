@@ -70,7 +70,8 @@ class FunctionalChallengeMetrics:
     release_token_recovered: bool = False
     migration_key_recovered: bool = False
     diag_tail_token_recovered: bool = False
-    report_module_created: bool = False
+    report_module_present: bool = False
+    report_module_implemented: bool = False
 
 
 @dataclass(frozen=True)
@@ -426,7 +427,6 @@ def evaluate_long_running_coverage(
             "production_files_changed >= 3",
             metrics.production_files_changed >= 3,
         ),
-        ("files_created >= 1", metrics.files_created >= 1),
         ("pagination_reads >= 8", metrics.pagination_reads >= 8),
         (
             "compaction_bearing_requests >= 3",
@@ -510,7 +510,8 @@ def evaluate_functional_challenge(
         ("release_token_recovered", metrics.release_token_recovered),
         ("migration_key_recovered", metrics.migration_key_recovered),
         ("diag_tail_token_recovered", metrics.diag_tail_token_recovered),
-        ("report_module_created", metrics.report_module_created),
+        ("report_module_present", metrics.report_module_present),
+        ("report_module_implemented", metrics.report_module_implemented),
     )
     failed = tuple(name for name, passed in requirements if not passed)
     return ChallengeEvaluation(
@@ -674,7 +675,10 @@ def build_report_payload(
         "diag_tail_token_recovered": (
             functional_metrics.diag_tail_token_recovered
         ),
-        "report_module_created": functional_metrics.report_module_created,
+        "report_module_present": functional_metrics.report_module_present,
+        "report_module_implemented": (
+            functional_metrics.report_module_implemented
+        ),
         "long_running_coverage_passed": coverage.passed,
         "functional_challenge_passed": functional.passed,
         "final_integrated_success": integrated,

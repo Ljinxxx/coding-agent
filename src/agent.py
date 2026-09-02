@@ -1,5 +1,6 @@
 import json
 from copy import deepcopy
+from pathlib import Path
 from typing import Any
 
 from src.context_compaction import (
@@ -378,9 +379,36 @@ class Agent:
             raise TypeError(
                 "progress_guard must be a ProgressGuardConfig or None."
             )
+        workspace: Path | None = None
+        if config.allowed_mutation_paths is not None:
+            workspaces: set[Path] = set()
+            registered_names = set(self.tool_registry.names())
+            for tool_name in config.mutation_tool_names:
+                if tool_name not in registered_names:
+                    continue
+                tool = self.tool_registry.get(tool_name)
+                tool_workspace = getattr(tool, "workspace", None)
+                if tool_workspace is None:
+                    raise ValueError(
+                        "allowed_mutation_paths requires every registered "
+                        "mutation tool to expose its workspace."
+                    )
+                workspaces.add(Path(tool_workspace).resolve(strict=False))
+            if not workspaces:
+                raise ValueError(
+                    "allowed_mutation_paths requires at least one registered "
+                    "mutation tool with a workspace."
+                )
+            if len(workspaces) != 1:
+                raise ValueError(
+                    "allowed_mutation_paths requires mutation tools to share "
+                    "one workspace."
+                )
+            workspace = next(iter(workspaces))
         return ProgressGuard(
             config,
             initial_workspace_revision=self._workspace_revision,
+            workspace=workspace,
         )
 
     def run(
@@ -494,7 +522,8 @@ class Agent:
                     )
                 ):
                     execution_result = active_progress_guard.blocked_result(
-                        tool_call.name
+                        tool_call.name,
+                        tool_call.arguments,
                     )
                 else:
                     execution_result = self.tool_executor.execute(

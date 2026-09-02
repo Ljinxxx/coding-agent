@@ -91,6 +91,22 @@ CHALLENGE_PYTEST_ARGUMENTS = (
 CHALLENGE_PYTEST_COMMAND = (
     "python " + " ".join(CHALLENGE_PYTEST_ARGUMENTS)
 )
+CHALLENGE_REPAIR_PYTEST_ARGUMENTS = (
+    "-B",
+    "-m",
+    "pytest",
+    "tests/test_release_repair.py",
+    "-q",
+    "--basetemp=.pytest_tmp",
+)
+CHALLENGE_REPAIR_PYTEST_COMMAND = (
+    "python " + " ".join(CHALLENGE_REPAIR_PYTEST_ARGUMENTS)
+)
+RUN4_ALLOWED_MUTATION_PATHS = (
+    "incident/store.py",
+    "incident/serializer.py",
+    "incident/report.py",
+)
 MAX_CONTEXT_CHARS = 24_000
 HOST_TEST_TIMEOUT_SECONDS = 30
 OUTPUT_PREVIEW_CHARS = 1_600
@@ -146,7 +162,8 @@ TRI_STATE_OBJECTIVE_FIELDS = (
     "release_token_recovered",
     "migration_key_recovered",
     "diag_tail_token_recovered",
-    "report_module_created",
+    "report_module_present",
+    "report_module_implemented",
 )
 
 
@@ -513,6 +530,14 @@ def _is_challenge_pytest_command(command: Any) -> bool:
     )
 
 
+def _is_challenge_repair_pytest_command(command: Any) -> bool:
+    tokens = _command_tokens(command)
+    return bool(
+        _is_python_command(tokens)
+        and tokens[1:] == CHALLENGE_REPAIR_PYTEST_ARGUMENTS
+    )
+
+
 def _is_diagnose_command(command: Any) -> bool:
     tokens = _command_tokens(command)
     return bool(
@@ -734,8 +759,8 @@ Retain every discovered DIRECTIVE_* value and the exact MIGRATION_KEY for the
 later repair run.
 
 Phase D - baseline diagnostic:
-Run the current visible pytest suite exactly once with
-`{CHALLENGE_PYTEST_COMMAND}`.
+Run the focused public repair suite exactly once with
+`{CHALLENGE_REPAIR_PYTEST_COMMAND}`.
 
 Phase E - baseline result:
 Observe its expected non-zero exit code as a project test failure, not a tool
@@ -760,17 +785,19 @@ audit, baseline failing pytest, and the BLOCKED diagnostic are already
 complete in this same Agent history. Use that history. Do not restart the
 investigation or rediscover previously retained directives or MIGRATION_KEY.
 
-Several public parser and CLI behaviors may already be correct in the starting
-workspace. Preserve behavior that already passes the visible tests and focus
-changes on actual failing release-contract behavior.
+The release repair surface for this run is intentionally bounded. Only
+incident/store.py, incident/serializer.py, and incident/report.py may be
+mutated. Preserve every other production file and its already-correct public
+APIs. Use the focused public repair tests to drive the repair loop, then
+complete the normal full verification flow.
 
 Action protocol:
 
 1. Use at most the first three model responses for one bounded refresh of the
    relevant incident/*.py production files and visible tests/*.py files.
 2. By the fourth model response, you MUST call edit_file or write_file and begin
-   the repair. Continue implementing the complete v2 contract, including any
-   required missing production module.
+   the repair. Continue implementing the complete v2 contract within the
+   declared repair-target files.
 3. Do not perform a repository-wide rescan or repeated directory scan. Do not
    reread README, docs, configuration, policy, legacy references, or the
    scripts/diagnose.py source. Do not read or modify scripts/diagnose.py.
@@ -792,7 +819,7 @@ Execution phases:
 Phase A - bounded production/test refresh (responses 1-3 only).
 Phase B - first edit_file or write_file mutation (no later than response 4).
 Phase C - implement the v2 repair.
-Phase D - run `{CHALLENGE_PYTEST_COMMAND}`.
+Phase D - run `{CHALLENGE_REPAIR_PYTEST_COMMAND}`.
 Phase E - after any non-zero result from that fixed pytest command, do not
 immediately rerun it. Use at most two following model responses for targeted
 diagnosis: diagnose the concrete failure from its output, inspecting only the
@@ -805,7 +832,8 @@ or repeat pytest; the next action must be that production mutation. Repeat this
 fail -> diagnose -> mutate -> retest cycle until it passes. Diagnosis here means
 reasoning from the pytest output; do not run scripts/diagnose.py while pytest is
 failing.
-Phase F - after visible pytest passes, perform one bounded public-contract
+Phase F - after the focused repair pytest passes, perform one bounded
+public-contract
 self-review using the documented contract and already available context. Review
 public input boundaries rather than only matching visible examples. Apply the
 documented public --min-severity contract: supported severity names are accepted
@@ -817,8 +845,9 @@ schema owned by incident.report.build_report. Do not construct a separate
 reduced report shape in the CLI. If this review requires a targeted production
 edit, make it and rerun the fixed pytest command. Do not rescan the repository
 or reread documentation for this review.
-Phase G - once visible pytest passes and the bounded self-review is complete,
-proceed directly to `python scripts/diagnose.py` and require DIAG_STATE=READY;
+Phase G - once the focused repair pytest passes and the bounded self-review is
+complete, proceed directly to `python scripts/diagnose.py` and require
+DIAG_STATE=READY;
 do not read or modify its source. If it returns BLOCKED, make only the targeted
 production repair indicated by that output, rerun the fixed pytest command, and
 then rerun the diagnostic. When it returns READY, do not repeat a successful
@@ -828,7 +857,7 @@ proceed immediately to Phase I without further inspection or tool calls.
 Phase I - return the final release answer immediately.
 
 Required terminal transitions after the bounded self-review:
-- visible pytest PASS -> diagnostic
+- focused repair pytest PASS -> diagnostic
 - DIAG_STATE=BLOCKED -> targeted production repair -> fixed pytest -> diagnostic
 - DIAG_STATE=READY -> verify_workspace immediately
 - verify_workspace PASS/CLEAN -> final answer immediately
@@ -852,9 +881,10 @@ Do not ask the user for them again."""
             run_4,
             True,
             ProgressGuardConfig(
-                tracked_commands=(CHALLENGE_PYTEST_COMMAND,),
+                tracked_commands=(CHALLENGE_REPAIR_PYTEST_COMMAND,),
                 mutation_tool_names=("edit_file", "write_file"),
                 diagnosis_responses=2,
+                allowed_mutation_paths=RUN4_ALLOWED_MUTATION_PATHS,
             ),
         ),
     )
@@ -1075,7 +1105,10 @@ def _tracked_command_result(
 
 
 def _tracked_pytest_result(exchange: ToolExchange) -> bool | None:
-    return _tracked_command_result(exchange, (CHALLENGE_PYTEST_COMMAND,))
+    return _tracked_command_result(
+        exchange,
+        (CHALLENGE_REPAIR_PYTEST_COMMAND,),
+    )
 
 
 def derive_pending_tracked_failure(
@@ -1232,7 +1265,7 @@ def _count_run4_pytest_reruns_without_intervening_mutation(
 
         if (
             exchange.name != "run_command"
-            or not _is_challenge_pytest_command(
+            or not _is_challenge_repair_pytest_command(
                 exchange.arguments.get("command")
             )
         ):
@@ -1557,7 +1590,9 @@ def analyze_history(
         (exchange, payload)
         for exchange, payload in run_command_payloads
         if exchange.run_index == 3
-        and _is_challenge_pytest_command(exchange.arguments.get("command"))
+        and _is_challenge_repair_pytest_command(
+            exchange.arguments.get("command")
+        )
     ]
     baseline_nonzero = len(baseline_payloads) == 1 and all(
         exchange.run_index == 3
@@ -1566,7 +1601,9 @@ def analyze_history(
     )
     run4_pytest_calls = sum(
         exchange.run_index == 4
-        and _is_challenge_pytest_command(exchange.arguments.get("command"))
+        and _is_challenge_repair_pytest_command(
+            exchange.arguments.get("command")
+        )
         for exchange, _ in run_command_payloads
     )
     diagnostic_payloads = [
@@ -1665,7 +1702,7 @@ def analyze_history(
     ]
     run3_unexpected_run_commands = sum(
         exchange.run_index == 3
-        and not _is_challenge_pytest_command(
+        and not _is_challenge_repair_pytest_command(
             exchange.arguments.get("command")
         )
         and not _is_diagnose_command(exchange.arguments.get("command"))
@@ -1927,8 +1964,8 @@ def assert_preflight(
     }
     require(len(actual_files) >= 18, "Fixture contains fewer than 18 files.")
     require(
-        "incident/report.py" not in initial_snapshot,
-        "incident/report.py must be absent initially.",
+        "incident/report.py" in initial_snapshot,
+        "incident/report.py must be present initially.",
     )
     require(
         set(fixture.protected_files) <= actual_files,
@@ -1983,10 +2020,12 @@ def assert_preflight(
     require(
         run4_progress_guard is not None
         and run4_progress_guard.tracked_commands
-        == (CHALLENGE_PYTEST_COMMAND,)
+        == (CHALLENGE_REPAIR_PYTEST_COMMAND,)
         and run4_progress_guard.mutation_tool_names
         == ("edit_file", "write_file")
         and run4_progress_guard.diagnosis_responses == 2
+        and run4_progress_guard.allowed_mutation_paths
+        == RUN4_ALLOWED_MUTATION_PATHS
         and run4_progress_guard.initial_pending_command is None
         and run4_progress_guard.initial_diagnosis_responses == 0,
         "Run 4 Progress Guard configuration is unexpected.",
@@ -2000,8 +2039,9 @@ def assert_preflight(
         "Completion Gate is not configured.",
     )
     require(
-        _is_challenge_pytest_command(verification_command),
-        "Trusted verification does not use the fixed Challenge pytest command.",
+        _is_challenge_pytest_command(verification_command)
+        and not _is_challenge_repair_pytest_command(verification_command),
+        "Trusted verification does not use the full Challenge pytest command.",
     )
     require(
         agent.max_steps == CHALLENGE_MAX_STEPS,
@@ -2286,7 +2326,8 @@ def _zero_functional_metrics() -> FunctionalChallengeMetrics:
         release_token_recovered=False,
         migration_key_recovered=False,
         diag_tail_token_recovered=False,
-        report_module_created=False,
+        report_module_present=False,
+        report_module_implemented=False,
     )
 
 
@@ -2521,7 +2562,9 @@ def execute_real_challenge(client: LLMClient) -> dict[str, Any]:
                                 agent.history,
                                 run_records,
                                 run_index=3,
-                                tracked_commands=(CHALLENGE_PYTEST_COMMAND,),
+                                tracked_commands=(
+                                    CHALLENGE_REPAIR_PYTEST_COMMAND,
+                                ),
                             )
                         )
                         require(
@@ -2723,7 +2766,18 @@ def execute_real_challenge(client: LLMClient) -> dict[str, Any]:
         tokens,
         run4_completed=run4_completed,
     )
-    report_module_created = "incident/report.py" in created_files
+    report_module_present = bool(
+        evidence_result.paths is not None
+        and evidence_result.final_snapshot_created
+        and (
+            evidence_result.paths.final_workspace
+            / "incident"
+            / "report.py"
+        ).is_file()
+    )
+    report_module_implemented = bool(
+        report_module_present and final_visible_passed
+    )
     objective_statuses: dict[str, bool | None] = {
         "initial_visible_tests_failed": evaluation_result(
             evaluated=initial_visible_evaluated,
@@ -2836,11 +2890,13 @@ def execute_real_challenge(client: LLMClient) -> dict[str, Any]:
             evaluated=run4_completed,
             passed=diag_tail_token_recovered,
         ),
-        "report_module_created": evaluation_result(
-            evaluated=(
-                run4_completed and evidence_result.changes_json_created
-            ),
-            passed=report_module_created,
+        "report_module_present": evaluation_result(
+            evaluated=evidence_result.final_snapshot_created,
+            passed=report_module_present,
+        ),
+        "report_module_implemented": evaluation_result(
+            evaluated=final_visible_evaluated,
+            passed=report_module_implemented,
         ),
     }
 
@@ -2900,7 +2956,8 @@ def execute_real_challenge(client: LLMClient) -> dict[str, Any]:
         release_token_recovered=release_token_recovered,
         migration_key_recovered=migration_key_recovered,
         diag_tail_token_recovered=diag_tail_token_recovered,
-        report_module_created=report_module_created,
+        report_module_present=report_module_present,
+        report_module_implemented=report_module_implemented,
     )
     coverage = evaluate_long_running_coverage(coverage_metrics)
     functional = evaluate_functional_challenge(functional_metrics)
@@ -3374,7 +3431,7 @@ def print_summary(report: dict[str, Any]) -> None:
         "Production Files Changed: "
         f"{report.get('production_files_changed', 0)} (minimum 3)"
     )
-    print(f"Files Created: {report.get('files_created', 0)} (minimum 1)")
+    print(f"Files Created (informational): {report.get('files_created', 0)}")
     print("\nPhase Discipline")
     print(f"Run 2 run_command Calls: {report.get('run2_run_command_calls', 0)}")
     print(f"Run 2 Migration Reads: {report.get('run2_migration_reads', 0)}")
@@ -3589,8 +3646,12 @@ def print_summary(report: dict[str, Any]) -> None:
         )
     )
     print(
-        "Report Module Created: "
-        + _status(report.get("report_module_created"))
+        "Report Module Present: "
+        + _status(report.get("report_module_present"))
+    )
+    print(
+        "Report Module Implemented: "
+        + _status(report.get("report_module_implemented"))
     )
     print("\nTiming Evidence")
     print(
